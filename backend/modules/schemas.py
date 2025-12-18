@@ -59,3 +59,20 @@ class TwinSettingsUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     settings: Optional[Dict[str, Any]] = None
+
+class YouTubeIngestRequest(BaseModel):
+    url: str
+
+class PodcastIngestRequest(BaseModel):
+    url: str # RSS feed or direct audio link
+
+class XThreadIngestRequest(BaseModel):
+    url: str
+
+class KnowledgeProfile(BaseModel):
+    total_chunks: int
+    total_sources: int
+    fact_count: int
+    opinion_count: int
+    tone_distribution: Dict[str, int]
+    top_tone: str

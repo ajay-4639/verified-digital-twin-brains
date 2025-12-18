@@ -8,7 +8,7 @@ def get_retrieval_tool(twin_id: str):
     Creates a tool for retrieving context from the digital twin's knowledge base.
     """
     @tool
-    def search_knowledge_base(query: str) -> str:
+    async def search_knowledge_base(query: str) -> str:
         """
         Searches the digital twin's knowledge base for information relevant to the query.
         Use this tool when you need information from documents uploaded by the owner.
@@ -16,7 +16,7 @@ def get_retrieval_tool(twin_id: str):
         """
         import json
         print(f"DEBUG: search_knowledge_base called with query: {query}")
-        contexts = retrieve_context(query, twin_id)
+        contexts = await retrieve_context(query, twin_id)
         return json.dumps(contexts)
     
     return search_knowledge_base

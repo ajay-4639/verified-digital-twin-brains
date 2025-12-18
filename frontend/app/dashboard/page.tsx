@@ -4,6 +4,9 @@ import React, { useState, useRef, useEffect } from 'react';
 import ChatInterface from '../../components/Chat/ChatInterface';
 import Link from 'next/link';
 
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const AUTH_TOKEN = process.env.NEXT_PUBLIC_DEV_TOKEN || 'development_token';
+
 export default function DashboardPage() {
   const [activeTwin, setActiveTwin] = useState('eeeed554-9180-4229-a9af-0f8dd2c69e9b');
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
@@ -16,8 +19,8 @@ export default function DashboardPage() {
   // Fetch sources
   const fetchSources = async () => {
     try {
-      const response = await fetch(`http://localhost:8000/sources/${activeTwin}`, {
-        headers: { 'Authorization': 'Bearer development_token' }
+      const response = await fetch(`${API_BASE_URL}/sources/${activeTwin}`, {
+        headers: { 'Authorization': `Bearer ${AUTH_TOKEN}` }
       });
       if (response.ok) {
         const data = await response.json();
@@ -32,9 +35,9 @@ export default function DashboardPage() {
     if (!confirm('Are you sure you want to delete this source? This will remove it from your twin\'s memory.')) return;
     
     try {
-      const response = await fetch(`http://localhost:8000/sources/${activeTwin}/${sourceId}`, {
+      const response = await fetch(`${API_BASE_URL}/sources/${activeTwin}/${sourceId}`, {
         method: 'DELETE',
-        headers: { 'Authorization': 'Bearer development_token' }
+        headers: { 'Authorization': `Bearer ${AUTH_TOKEN}` }
       });
       if (response.ok) {
         await fetchSources();
@@ -51,7 +54,7 @@ export default function DashboardPage() {
   useEffect(() => {
     const checkHealth = async () => {
       try {
-        const response = await fetch('http://localhost:8000/health');
+        const response = await fetch(`${API_BASE_URL}/health`);
         if (response.ok) {
           const data = await response.json();
           setSystemStatus(data.status === 'online' ? 'online' : 'degraded');
@@ -81,10 +84,10 @@ export default function DashboardPage() {
     formData.append('file', file);
 
     try {
-      const response = await fetch(`http://localhost:8000/ingest/${activeTwin}`, {
+      const response = await fetch(`${API_BASE_URL}/ingest/${activeTwin}`, {
         method: 'POST',
         headers: {
-          'Authorization': 'Bearer development_token', // Using dev token for local testing
+          'Authorization': `Bearer ${AUTH_TOKEN}`, // Using dev token for local testing
         },
         body: formData,
       });

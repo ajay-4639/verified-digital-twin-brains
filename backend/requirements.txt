@@ -15,3 +15,11 @@ python-jose[cryptography]
 passlib[bcrypt]
 composio-langchain
 cohere
+pytest
+pytest-asyncio
+httpx
+yt-dlp
+feedparser
+twikit
+openai-whisper
+youtube-transcript-api

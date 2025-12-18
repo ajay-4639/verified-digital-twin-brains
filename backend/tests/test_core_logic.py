@@ -3,7 +3,8 @@ from unittest.mock import MagicMock, patch
 from modules.retrieval import retrieve_context
 from modules.answering import generate_answer
 
-def test_retrieve_context_structure():
+@pytest.mark.asyncio
+async def test_retrieve_context_structure():
     # Mock Pinecone index
     mock_index = MagicMock()
     mock_index.query.return_value = {
@@ -16,14 +17,18 @@ def test_retrieve_context_structure():
     }
     
     with patch("modules.retrieval.get_pinecone_index", return_value=mock_index), \
-         patch("modules.retrieval.get_embedding", return_value=[0.1]*3072):
+         patch("modules.retrieval.get_embedding", return_value=[0.1]*3072), \
+         patch("modules.retrieval.expand_query", return_value=["query var"]), \
+         patch("modules.retrieval.generate_hyde_answer", return_value="hyde answer"), \
+         patch("modules.retrieval.get_embeddings_async", return_value=[[0.1]*3072]*3):
         
-        results = retrieve_context("test query", "twin-456")
+        results = await retrieve_context("test query", "twin-456")
         
         assert len(results) == 1
         assert results[0]["text"] == "This is a test chunk"
-        assert results[0]["score"] == 0.9
+        assert results[0]["score"] == 1.0
         assert results[0]["source_id"] == "src-123"
+        assert results[0]["is_verified"] == True
 
 def test_generate_answer_citations():
     mock_contexts = [

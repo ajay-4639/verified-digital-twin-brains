@@ -10,8 +10,20 @@ ALGORITHM = "HS256"
 DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
 DEV_TOKEN = "development_token"
 
-def get_current_user(authorization: str = Header(None)):
-    # Development bypass
+def get_current_user(authorization: str = Header(None), x_twin_api_key: str = Header(None)):
+    # 1. API Key check (for public widgets)
+    if x_twin_api_key:
+        # For now, we'll check if the API key matches a twin's "public_api_key"
+        # In a real app, you'd fetch the twin and verify the key.
+        # For Phase 3, let's allow "public_dev_key" for any twin ID for testing.
+        if x_twin_api_key == "public_dev_key" or x_twin_api_key == os.getenv("WIDGET_API_KEY"):
+            return {
+                "user_id": "public_widget_user",
+                "tenant_id": "public",
+                "role": "visitor"
+            }
+
+    # 2. Development bypass
     if DEV_MODE and authorization == f"Bearer {DEV_TOKEN}":
         return {
             "user_id": "b415a7a9-c8f8-43b3-8738-a0062a90c016", 

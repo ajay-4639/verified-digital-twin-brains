@@ -2,7 +2,13 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from modules.auth_guard import get_current_user, verify_owner
-from modules.ingestion import ingest_source, delete_source
+from modules.ingestion import (
+    ingest_source, 
+    delete_source, 
+    ingest_youtube_transcript,
+    ingest_podcast_rss,
+    ingest_x_thread
+)
 from modules.retrieval import retrieve_context
 from modules.agent import run_agent_stream
 from modules.memory import inject_verified_memory
@@ -13,6 +19,7 @@ from modules.observability import (
     get_conversations, 
     get_messages,
     get_sources,
+    get_knowledge_profile,
     supabase
 )
 from modules.schemas import (
@@ -22,7 +29,11 @@ from modules.schemas import (
     ChatDone, 
     IngestionResponse,
     EscalationSchema,
-    TwinSettingsUpdate
+    TwinSettingsUpdate,
+    YouTubeIngestRequest,
+    PodcastIngestRequest,
+    XThreadIngestRequest,
+    KnowledgeProfile
 )
 from modules.clients import get_pinecone_index, get_openai_client
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -37,9 +48,10 @@ from pydantic import BaseModel
 app = FastAPI(title="Verified Digital Twin Brain API")
 
 # Add CORS middleware
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allow all for development
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -180,9 +192,45 @@ async def resolve_escalation(escalation_id: str, request: ResolutionRequest, use
         # 2. Inject into Pinecone for long-term memory
         vector_id = await inject_verified_memory(escalation_id, request.owner_answer)
         
+        # 3. Fetch twin_id to trigger style update
+        from modules.observability import supabase
+        esc_res = supabase.table("escalations").select("messages(conversations(twin_id))").eq("id", escalation_id).single().execute()
+        if esc_res.data:
+            twin_id = esc_res.data["messages"]["conversations"]["twin_id"]
+            # Trigger background style analysis refresh
+            from modules.agent import get_owner_style_profile
+            asyncio.create_task(get_owner_style_profile(twin_id, force_refresh=True))
+        
         return {"status": "success", "vector_id": vector_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ingest/youtube/{twin_id}")
+async def ingest_youtube(twin_id: str, request: YouTubeIngestRequest, user=Depends(verify_owner)):
+    source_id = str(uuid.uuid4())
+    try:
+        num_chunks = await ingest_youtube_transcript(source_id, twin_id, request.url)
+        return {"status": "success", "chunks_ingested": num_chunks, "source_id": source_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/ingest/podcast/{twin_id}")
+async def ingest_podcast(twin_id: str, request: PodcastIngestRequest, user=Depends(verify_owner)):
+    source_id = str(uuid.uuid4())
+    try:
+        num_chunks = await ingest_podcast_rss(source_id, twin_id, request.url)
+        return {"status": "success", "chunks_ingested": num_chunks, "source_id": source_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/ingest/x/{twin_id}")
+async def ingest_x(twin_id: str, request: XThreadIngestRequest, user=Depends(verify_owner)):
+    source_id = str(uuid.uuid4())
+    try:
+        num_chunks = await ingest_x_thread(source_id, twin_id, request.url)
+        return {"status": "success", "chunks_ingested": num_chunks, "source_id": source_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/ingest/{twin_id}")
 async def ingest(twin_id: str, file: UploadFile = File(...), user=Depends(verify_owner)):
@@ -222,6 +270,15 @@ async def remove_source(twin_id: str, source_id: str, user=Depends(verify_owner)
 @app.get("/sources/{twin_id}")
 async def list_sources(twin_id: str, user=Depends(get_current_user)):
     return get_sources(twin_id)
+
+@app.get("/twins/{twin_id}/knowledge-profile", response_model=KnowledgeProfile)
+async def knowledge_profile(twin_id: str, user=Depends(get_current_user)):
+    try:
+        profile = await get_knowledge_profile(twin_id)
+        return profile
+    except Exception as e:
+        print(f"Error fetching knowledge profile: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/twins/{twin_id}")
 async def get_twin(twin_id: str, user=Depends(verify_owner)):

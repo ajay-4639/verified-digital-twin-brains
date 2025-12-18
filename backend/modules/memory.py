@@ -22,7 +22,8 @@ async def inject_verified_memory(escalation_id: str, owner_answer: str):
     index = get_pinecone_index()
     vector_id = f"verified_{str(uuid.uuid4())}"
     
-    index.upsert([{
+    index.upsert(
+        vectors=[{
         "id": vector_id,
         "values": embedding,
         "metadata": {
@@ -32,7 +33,9 @@ async def inject_verified_memory(escalation_id: str, owner_answer: str):
             "is_verified": True,
             "priority": 10 # High priority for verified answers
         }
-    }])
+        }],
+        namespace=twin_id
+    )
     
     return vector_id
 

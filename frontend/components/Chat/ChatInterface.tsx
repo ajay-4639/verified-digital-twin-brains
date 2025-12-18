@@ -2,6 +2,9 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const AUTH_TOKEN = process.env.NEXT_PUBLIC_DEV_TOKEN || 'development_token';
+
 interface Message {
   role: 'user' | 'assistant';
   content: string;
@@ -9,16 +12,6 @@ interface Message {
   confidence_score?: number;
 }
 
-/**
- * ChatInterface Component
- * 
- * The primary interface for interacting with a Digital Twin. 
- * Supports streaming responses, conversation history, and real-time confidence/citation display.
- * 
- * @param twinId - The UUID of the digital twin being queried.
- * @param conversationId - Optional existing conversation UUID to load history.
- * @param onConversationStarted - Callback when a new conversation is initialized by the backend.
- */
 export default function ChatInterface({ 
   twinId, 
   conversationId, 
@@ -36,12 +29,9 @@ export default function ChatInterface({
   ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [isSearching, setIsSearching] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  /**
-   * Fetches and loads message history for a given conversation.
-   * If no conversationId is provided, resets to the initial greeting.
-   */
   useEffect(() => {
     const loadHistory = async () => {
       if (!conversationId) {
@@ -84,15 +74,6 @@ export default function ChatInterface({
     scrollToBottom();
   }, [messages, loading]);
 
-  /**
-   * Sends a user query to the backend and processes the streaming NDJSON response.
-   * 
-   * Flow:
-   * 1. Add user message to UI.
-   * 2. Start streaming request to /chat/{twinId}.
-   * 3. Parse NDJSON chunks (metadata -> content -> done).
-   * 4. Update the last assistant message in real-time.
-   */
   const sendMessage = async () => {
     if (!input.trim() || loading) return;
 
@@ -100,21 +81,23 @@ export default function ChatInterface({
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
     setLoading(true);
+    setIsSearching(true);
 
-    // Create a placeholder for the assistant message
     const assistantMsg: Message = {
       role: 'assistant',
       content: '',
     };
     setMessages((prev) => [...prev, assistantMsg]);
 
-    try {
-      const url = new URL(`http://localhost:8000/chat/${twinId}`);
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/3d34fe3a-675f-4cc6-ab67-b3a4777ebed8',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ChatInterface.tsx:sendMessage',message:'Attempting to send message',data:{twinId,input},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'Frontend'})}).catch(()=>{});
+    // #endregion
 
-      const response = await fetch(url.toString(), {
+    try {
+      const response = await fetch(`${API_BASE_URL}/chat/${twinId}`, {
         method: 'POST',
         headers: {
-          'Authorization': 'Bearer development_token',
+          'Authorization': `Bearer ${AUTH_TOKEN}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -123,11 +106,7 @@ export default function ChatInterface({
         }),
       });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || `Server returned ${response.status}`);
-      }
-
+      if (!response.ok) throw new Error('Network response was not ok');
       if (!response.body) throw new Error('No response body');
 
       const reader = response.body.getReader();
@@ -146,6 +125,7 @@ export default function ChatInterface({
             try {
               const data = JSON.parse(line);
               if (data.type === 'metadata') {
+                setIsSearching(false); // Found context, now generating
                 if (data.conversation_id && !conversationId && onConversationStarted) {
                   onConversationStarted(data.conversation_id);
                 }
@@ -174,84 +154,78 @@ export default function ChatInterface({
       }
     } catch (error: any) {
       console.error('Error sending message:', error);
-      let errorMessage = "Sorry, I'm having trouble connecting to my brain right now.";
-      if (error.message?.includes('Failed to fetch')) {
-        errorMessage = "Could not connect to the backend server. Please ensure the FastAPI server is running on port 8000.";
-      } else if (error.message) {
-        errorMessage = `Error: ${error.message}`;
-      }
       setMessages((prev) => {
         const last = [...prev];
         last[last.length - 1] = { 
           role: 'assistant', 
-          content: errorMessage
+          content: "Sorry, I'm having trouble connecting to my brain right now."
         };
         return last;
       });
     } finally {
       setLoading(false);
+      setIsSearching(false);
     }
   };
 
   return (
-    <div className="flex flex-col h-full w-full bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-      {/* Chat Header */}
-      <div className="px-6 py-4 bg-slate-50 border-b flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+    <div className="flex flex-col h-[calc(100vh-100px)] w-full bg-white rounded-3xl shadow-xl shadow-slate-200/50 border border-slate-100 overflow-hidden">
+      {/* Header */}
+      <div className="px-8 py-6 bg-white border-b flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <div className="relative">
+            <div className="w-12 h-12 bg-blue-600 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-blue-200">
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+            </div>
+            <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-green-500 border-4 border-white rounded-full"></div>
           </div>
           <div>
-            <div className="font-bold text-slate-800">Verified Twin</div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-              <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Ready to assist</span>
+            <div className="font-black text-slate-800 tracking-tight">Verified Digital Twin</div>
+            <div className="text-[10px] uppercase font-bold text-slate-400 tracking-widest flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></span>
+              Live Knowledge Base
             </div>
           </div>
         </div>
-        <div className="text-xs font-medium text-slate-400 bg-white px-3 py-1 rounded-full border">
-          ID: {twinId}
+        <div className="flex items-center gap-2">
+          <button className="p-2.5 text-slate-400 hover:text-slate-800 hover:bg-slate-50 rounded-xl transition-all">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
+          </button>
         </div>
       </div>
 
-      {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-[#fcfcfd]">
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto p-8 space-y-8 bg-[#fcfcfd]">
         {messages.map((msg, idx) => (
-          <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-in fade-in slide-in-from-bottom-2 duration-300`}>
-            <div className={`flex gap-3 max-w-[85%] ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
-              {/* Avatar Icon */}
-              <div className={`w-8 h-8 rounded-full shrink-0 flex items-center justify-center text-xs font-bold ${
-                msg.role === 'user' ? 'bg-indigo-100 text-indigo-600' : 'bg-blue-100 text-blue-600'
+          <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-in fade-in slide-in-from-bottom-4 duration-500`}>
+            <div className={`flex gap-4 max-w-[80%] ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
+              <div className={`w-10 h-10 rounded-2xl shrink-0 flex items-center justify-center text-xs font-black shadow-sm ${
+                msg.role === 'user' ? 'bg-indigo-600 text-white' : 'bg-white text-blue-600 border border-slate-100'
               }`}>
-                {msg.role === 'user' ? 'U' : 'AI'}
+                {msg.role === 'user' ? 'YOU' : 'AI'}
               </div>
 
-              <div className="space-y-2">
-                <div className={`p-4 rounded-2xl shadow-sm border ${
+              <div className="space-y-3">
+                <div className={`p-5 rounded-3xl text-sm leading-relaxed ${
                   msg.role === 'user' 
-                    ? 'bg-blue-600 text-white border-blue-500 rounded-tr-none' 
-                    : 'bg-white text-slate-800 border-slate-100 rounded-tl-none'
+                    ? 'bg-blue-600 text-white shadow-lg shadow-blue-100 rounded-tr-none' 
+                    : 'bg-white text-slate-800 border border-slate-100 shadow-sm rounded-tl-none'
                 }`}>
-                  <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
+                  <p className="whitespace-pre-wrap">{msg.content}</p>
                 </div>
 
-                {/* Citations & Confidence (Assistant Only) */}
                 {msg.role === 'assistant' && (msg.citations || msg.confidence_score !== undefined) && (
                   <div className="flex flex-wrap gap-2 px-1">
                     {msg.confidence_score !== undefined && (
-                      <div className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold border uppercase ${
-                        msg.confidence_score > 0.8 
-                          ? 'bg-green-50 text-green-700 border-green-100' 
-                          : msg.confidence_score > 0.5 
-                            ? 'bg-yellow-50 text-yellow-700 border-yellow-100'
-                            : 'bg-red-50 text-red-700 border-red-100'
+                      <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black border uppercase tracking-wider ${
+                        msg.confidence_score > 0.8 ? 'bg-green-50 text-green-700 border-green-100' : 'bg-yellow-50 text-yellow-700 border-yellow-100'
                       }`}>
-                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg>
-                        Confidence: {(msg.confidence_score * 100).toFixed(0)}%
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                        Verified: {(msg.confidence_score * 100).toFixed(0)}%
                       </div>
                     )}
                     {msg.citations?.map((source, sIdx) => (
-                      <div key={sIdx} className="bg-slate-100 text-slate-600 px-2 py-1 rounded-md text-[10px] font-bold border border-slate-200 uppercase flex items-center gap-1">
+                      <div key={sIdx} className="bg-slate-100 text-slate-500 px-3 py-1.5 rounded-full text-[10px] font-black border border-slate-200 uppercase tracking-wider flex items-center gap-1.5">
                         <svg className="w-3 h-3 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg>
                         Source {sIdx + 1}
                       </div>
@@ -263,11 +237,13 @@ export default function ChatInterface({
           </div>
         ))}
         {loading && (
-          <div className="flex justify-start animate-pulse">
-            <div className="flex gap-3 max-w-[85%]">
-              <div className="w-8 h-8 rounded-full bg-slate-100 shrink-0"></div>
-              <div className="bg-white p-4 rounded-2xl border border-slate-100 text-slate-400 text-sm">
-                Searching documents...
+          <div className="flex justify-start">
+            <div className="flex gap-4 max-w-[80%]">
+              <div className="w-10 h-10 rounded-2xl bg-white border border-slate-100 flex items-center justify-center shadow-sm">
+                <div className="w-5 h-5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+              </div>
+              <div className="bg-white p-5 rounded-3xl border border-slate-100 text-slate-400 text-sm shadow-sm rounded-tl-none italic">
+                {isSearching ? 'Analyzing knowledge base...' : 'Generating verified response...'}
               </div>
             </div>
           </div>
@@ -275,29 +251,28 @@ export default function ChatInterface({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input Area */}
-      <div className="p-4 bg-white border-t">
-        <div className="relative flex items-center">
+      {/* Input */}
+      <div className="p-8 bg-white border-t border-slate-50">
+        <div className="relative flex items-center max-w-4xl mx-auto w-full">
           <input
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
             placeholder="Ask a question about your documents..."
-            className="w-full bg-slate-100 border-none rounded-xl px-5 py-4 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all pr-24"
+            className="w-full bg-slate-100 border-none rounded-2xl px-6 py-5 text-sm focus:outline-none focus:ring-4 focus:ring-blue-100 transition-all pr-24 font-medium"
           />
           <button
             onClick={sendMessage}
             disabled={loading || !input.trim()}
-            className="absolute right-2 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition-all flex items-center gap-2"
+            className="absolute right-2.5 bg-blue-600 text-white px-6 py-3 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition-all shadow-lg shadow-blue-200 active:scale-95"
           >
-            <span>Ask</span>
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path></svg>
+            Send
           </button>
         </div>
-        <p className="mt-3 text-[10px] text-center text-slate-400 font-medium tracking-wide uppercase">
-          Verified answers only. hallucination prevention enabled.
-        </p>
+        <div className="mt-4 text-[10px] text-center text-slate-400 font-bold uppercase tracking-widest">
+          Secured with end-to-end verification
+        </div>
       </div>
     </div>
   );

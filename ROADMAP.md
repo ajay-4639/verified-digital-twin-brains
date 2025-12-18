@@ -1,5 +1,7 @@
 # Roadmap: Verified Digital Twin Brain
 
+*Checkpoint system active: Phase completions are automatically tagged and released.*
+
 This roadmap outlines the evolution of the Verified Digital Twin Brain platform, moving from a grounded Q&A engine to a fully autonomous, accountable agent.
 
 ## Current Progress: Phase 1 (MVP) - Grounded Answers

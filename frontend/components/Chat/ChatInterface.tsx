@@ -43,8 +43,8 @@ export default function ChatInterface({
       }
 
       try {
-        const response = await fetch(`http://localhost:8000/conversations/${conversationId}/messages`, {
-          headers: { 'Authorization': 'Bearer development_token' }
+        const response = await fetch(`${API_BASE_URL}/conversations/${conversationId}/messages`, {
+          headers: { 'Authorization': `Bearer ${AUTH_TOKEN}` }
         });
         if (response.ok) {
           const data = await response.json();
@@ -88,10 +88,6 @@ export default function ChatInterface({
       content: '',
     };
     setMessages((prev) => [...prev, assistantMsg]);
-
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/3d34fe3a-675f-4cc6-ab67-b3a4777ebed8',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ChatInterface.tsx:sendMessage',message:'Attempting to send message',data:{twinId,input},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'Frontend'})}).catch(()=>{});
-    // #endregion
 
     try {
       const response = await fetch(`${API_BASE_URL}/chat/${twinId}`, {

@@ -53,10 +53,10 @@ async def get_knowledge_profile(twin_id: str):
     index = get_pinecone_index()
     
     # Query Pinecone for a sample of vectors to analyze metadata
-    # We use a dummy vector for a broad search within the namespace
+    # We use a dummy non-zero vector for a broad search within the namespace
     # Dimensions for text-embedding-3-large is 3072
     query_res = index.query(
-        vector=[0.0] * 3072,
+        vector=[0.1] * 3072,
         top_k=1000, # Analyze up to 1000 chunks
         include_metadata=True,
         namespace=twin_id

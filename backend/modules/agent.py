@@ -44,7 +44,7 @@ async def get_owner_style_profile(twin_id: str, force_refresh: bool = False) -> 
         index = get_pinecone_index()
         try:
             opinion_search = index.query(
-                vector=[0.0] * 3072, # Dummy vector for metadata-only search if supported, or just use a common embedding
+                vector=[0.1] * 3072, # Use non-zero vector for metadata filtering
                 filter={"category": {"$eq": "OPINION"}},
                 top_k=20, # Increased for better analysis
                 include_metadata=True,

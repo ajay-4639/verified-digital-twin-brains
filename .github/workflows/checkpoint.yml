@@ -1,0 +1,42 @@
+name: Automated Phase Checkpoint
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  checkpoint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to create tags and releases
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Get all tags to compare
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Add any dependencies for the check script if needed
+          # For now it only uses stdlib
+
+      - name: Detect Phase Completion
+        id: detect
+        run: python backend/scripts/check_phase.py
+
+      - name: Create Release
+        if: steps.detect.outputs.NEW_PHASE_DETECTED == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.detect.outputs.PHASE_TAG }}
+          name: ${{ steps.detect.outputs.PHASE_NAME }}
+          body: ${{ steps.detect.outputs.PHASE_NOTES }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

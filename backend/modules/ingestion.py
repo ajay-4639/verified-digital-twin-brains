@@ -28,14 +28,15 @@ def get_embedding(text: str):
     return response.data[0].embedding
 
 async def ingest_source(source_id: str, twin_id: str, file_path: str, filename: str = None):
-    # 0. Check for existing source with same name to handle "update"
+    # 0. Check for existing sources with same name to handle "update"
     if filename:
         existing = supabase.table("sources").select("id").eq("twin_id", twin_id).eq("filename", filename).execute()
         if existing.data:
-            print(f"File {filename} already exists. Updating source...")
-            # Delete old data first
-            old_source_id = existing.data[0]["id"]
-            await delete_source(old_source_id, twin_id)
+            print(f"File {filename} already exists. Updating source(s)...")
+            # Delete ALL old versions first to keep knowledge clean
+            for record in existing.data:
+                old_source_id = record["id"]
+                await delete_source(old_source_id, twin_id)
             # We keep the new source_id for the new record
 
     # 0.1 Record source in Supabase

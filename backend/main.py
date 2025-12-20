@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from modules.auth_guard import get_current_user, verify_owner
@@ -12,6 +12,31 @@ from modules.ingestion import (
 from modules.retrieval import retrieve_context
 from modules.agent import run_agent_stream
 from modules.memory import inject_verified_memory
+from modules.verified_qna import (
+    create_verified_qna,
+    get_verified_qna,
+    edit_verified_qna,
+    list_verified_qna
+)
+from modules.access_groups import (
+    get_user_group,
+    get_default_group,
+    create_group,
+    assign_user_to_group,
+    add_content_permission,
+    remove_content_permission,
+    get_group_permissions,
+    get_groups_for_content,
+    list_groups,
+    get_group,
+    update_group,
+    delete_group,
+    get_group_members,
+    set_group_limit,
+    get_group_limits,
+    set_group_override,
+    get_group_overrides
+)
 from modules.escalation import create_escalation, resolve_escalation as resolve_db_escalation
 from modules.observability import (
     log_interaction, 
@@ -33,16 +58,27 @@ from modules.schemas import (
     YouTubeIngestRequest,
     PodcastIngestRequest,
     XThreadIngestRequest,
-    KnowledgeProfile
+    KnowledgeProfile,
+    VerifiedQnACreateRequest,
+    VerifiedQnAUpdateRequest,
+    VerifiedQnASchema,
+    AccessGroupSchema,
+    GroupMembershipSchema,
+    ContentPermissionSchema,
+    GroupCreateRequest,
+    GroupUpdateRequest,
+    AssignUserRequest,
+    ContentPermissionRequest
 )
 from modules.clients import get_pinecone_index, get_openai_client
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from typing import Dict, Any
 import os
 import shutil
 import uuid
 import json
 import asyncio
-from typing import List
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 
 app = FastAPI(title="Verified Digital Twin Brain API")
@@ -91,12 +127,44 @@ async def health_check():
 async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user)):
     query = request.query
     conversation_id = request.conversation_id
+    group_id = request.group_id
+    
+    # Determine user's group
+    if not group_id:
+        # Check if conversation has a group_id set
+        if conversation_id:
+            conv_response = supabase.table("conversations").select("group_id").eq("id", conversation_id).single().execute()
+            if conv_response.data and conv_response.data.get("group_id"):
+                group_id = conv_response.data["group_id"]
+        
+        # If still no group_id, get user's default group
+        if not group_id:
+            user_id = user.get("user_id")
+            if user_id:
+                user_group = await get_user_group(user_id, twin_id)
+                if user_group:
+                    group_id = user_group["id"]
+            
+            # Fallback to default group if user has no group
+            if not group_id:
+                default_group = await get_default_group(twin_id)
+                group_id = default_group["id"]
     
     # 1. Logging User Message
     if not conversation_id:
-        # Create a new conversation in Supabase
-        conv = create_conversation(twin_id, user.get("user_id"))
-        conversation_id = conv["id"] if conv else str(uuid.uuid4())
+        # Create a new conversation in Supabase with group_id
+        conv_data = {
+            "twin_id": twin_id,
+            "user_id": user.get("user_id"),
+            "group_id": group_id
+        }
+        conv_response = supabase.table("conversations").insert(conv_data).execute()
+        conversation_id = conv_response.data[0]["id"] if conv_response.data else str(uuid.uuid4())
+    else:
+        # Update conversation with group_id if not already set
+        conv_response = supabase.table("conversations").select("group_id").eq("id", conversation_id).single().execute()
+        if conv_response.data and not conv_response.data.get("group_id"):
+            supabase.table("conversations").update({"group_id": group_id}).eq("id", conversation_id).execute()
         
     # 2. Get history (fetch BEFORE logging the new message to avoid duplicates)
     history = []
@@ -124,7 +192,7 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
         confidence_score = 0.0
         sent_metadata = False
 
-        async for event in run_agent_stream(twin_id, query, history, system_prompt):
+        async for event in run_agent_stream(twin_id, query, history, system_prompt, group_id=group_id):
             # The event is a dict from LangGraph updates
             if "tools" in event:
                 # Update citations and confidence from tool results
@@ -185,23 +253,101 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
 
 @app.post("/escalations/{escalation_id}/resolve")
 async def resolve_escalation(escalation_id: str, request: ResolutionRequest, user=Depends(verify_owner)):
+    import json
+    import time
+    import traceback
+    from datetime import datetime
+    
     try:
-        # 1. Update the database state (mark as resolved, add reply)
-        await resolve_db_escalation(escalation_id, user.get("user_id"), request.owner_answer)
-        
-        # 2. Inject into Pinecone for long-term memory
-        vector_id = await inject_verified_memory(escalation_id, request.owner_answer)
-        
-        # 3. Fetch twin_id to trigger style update
+        # 1. Fetch escalation and original message to get question
         from modules.observability import supabase
-        esc_res = supabase.table("escalations").select("messages(conversations(twin_id))").eq("id", escalation_id).single().execute()
-        if esc_res.data:
-            twin_id = esc_res.data["messages"]["conversations"]["twin_id"]
-            # Trigger background style analysis refresh
+        esc_res = supabase.table("escalations").select(
+            "*, messages(*, conversations(twin_id))"
+        ).eq("id", escalation_id).single().execute()
+        
+        if not esc_res.data:
+            raise HTTPException(status_code=404, detail="Escalation not found")
+        
+        # Extract question from the original message that triggered escalation
+        # NOTE: messages.content is the ASSISTANT message, not the user question
+        # We need to get the user message from the conversation instead
+        assistant_message = esc_res.data["messages"]
+        conversation_id = assistant_message.get("conversation_id")
+        assistant_created_at = assistant_message.get("created_at")
+        
+        if not conversation_id:
+            raise ValueError(f"Could not find conversation_id for escalation {escalation_id}")
+        
+        # Fetch all user messages in the conversation, then filter in Python
+        question = None
+        try:
+            all_user_msgs = supabase.table("messages").select("*").eq(
+                "conversation_id", conversation_id
+            ).eq("role", "user").order("created_at", desc=True).execute()
+            
+            # Find the user message that comes before the assistant message
+            if all_user_msgs.data:
+                from datetime import datetime
+                try:
+                    # Parse assistant timestamp for comparison
+                    if isinstance(assistant_created_at, str):
+                        assistant_created_at_clean = assistant_created_at.replace('Z', '+00:00')
+                        assistant_ts = datetime.fromisoformat(assistant_created_at_clean)
+                    else:
+                        assistant_ts = assistant_created_at
+                    
+                    # Find the first user message (most recent) that was created before assistant message
+                    for user_msg in all_user_msgs.data:
+                        user_created_at = user_msg.get("created_at")
+                        if isinstance(user_created_at, str):
+                            user_created_at_clean = user_created_at.replace('Z', '+00:00')
+                            user_ts = datetime.fromisoformat(user_created_at_clean)
+                        else:
+                            user_ts = user_created_at
+                        
+                        if user_ts < assistant_ts:
+                            question = user_msg.get("content")
+                            break
+                except Exception as e:
+                    # Fallback: use the most recent user message
+                    if all_user_msgs.data:
+                        question = all_user_msgs.data[0].get("content")
+        except Exception as e:
+            question = None
+        
+        # Fallback to assistant message content if no user question found
+        if not question:
+            question = assistant_message.get("content")
+        
+        twin_id = esc_res.data["messages"]["conversations"]["twin_id"]
+        owner_id = user.get("user_id")
+        
+        # 2. Update the database state (mark as resolved, add reply)
+        await resolve_db_escalation(escalation_id, owner_id, request.owner_answer)
+        
+        # 3. Create verified QnA entry in Postgres (this also calls inject_verified_memory for backward compatibility)
+        verified_qna_id = await create_verified_qna(
+            escalation_id=escalation_id,
+            question=question,
+            answer=request.owner_answer,
+            owner_id=owner_id,
+            citations=None,  # Can be enhanced to extract citations from escalation context
+            twin_id=twin_id
+        )
+        
+        # 4. Trigger background style analysis refresh (don't block on this)
+        try:
             from modules.agent import get_owner_style_profile
             asyncio.create_task(get_owner_style_profile(twin_id, force_refresh=True))
+        except Exception as bg_error:
+            # Log but don't fail the request if background task setup fails
+            print(f"Warning: Failed to start background style profile refresh: {bg_error}")
         
-        return {"status": "success", "vector_id": vector_id}
+        return {
+            "status": "success",
+            "verified_qna_id": verified_qna_id,
+            "message": "Escalation resolved and verified QnA created"
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -296,11 +442,433 @@ async def update_twin(twin_id: str, update: TwinSettingsUpdate, user=Depends(ver
     response = supabase.table("twins").update(update_data).eq("id", twin_id).execute()
     return response.data
 
-@app.get("/escalations", response_model=List[EscalationSchema])
+@app.get("/escalations")  # Removed response_model to allow extra fields
 async def list_escalations(user=Depends(verify_owner)):
-    # Simple fetch for all escalations
+    # Fetch escalations with assistant messages
     response = supabase.table("escalations").select("*, messages(*)").order("created_at", desc=True).execute()
-    return response.data
+    
+    # For each escalation, fetch the user question (the message before the assistant message in the conversation)
+    result = []
+    for esc in (response.data or []):
+        assistant_msg = esc.get("messages")
+        if assistant_msg:
+            conversation_id = assistant_msg.get("conversation_id")
+            assistant_created_at = assistant_msg.get("created_at")
+            
+            # Get the most recent user message in this conversation that was created before the assistant message
+            user_question = None
+            try:
+                # Fetch all user messages in the conversation, ordered by created_at descending (most recent first)
+                all_user_msgs = supabase.table("messages").select("*").eq(
+                    "conversation_id", conversation_id
+                ).eq("role", "user").order("created_at", desc=True).execute()
+                
+                # Find the user message that comes before the assistant message
+                if all_user_msgs.data:
+                    from datetime import datetime
+                    try:
+                        # Parse assistant timestamp for comparison
+                        if isinstance(assistant_created_at, str):
+                            # Handle ISO format strings
+                            assistant_created_at_clean = assistant_created_at.replace('Z', '+00:00')
+                            assistant_ts = datetime.fromisoformat(assistant_created_at_clean)
+                        else:
+                            assistant_ts = assistant_created_at
+                        
+                        # Find the first user message (most recent) that was created before assistant message
+                        for user_msg in all_user_msgs.data:
+                            user_created_at = user_msg.get("created_at")
+                            if isinstance(user_created_at, str):
+                                user_created_at_clean = user_created_at.replace('Z', '+00:00')
+                                user_ts = datetime.fromisoformat(user_created_at_clean)
+                            else:
+                                user_ts = user_created_at
+                            
+                            if user_ts < assistant_ts:
+                                user_question = user_msg.get("content")
+                                break
+                    except Exception as e:
+                        # Fallback: use the most recent user message
+                        if all_user_msgs.data:
+                            user_question = all_user_msgs.data[0].get("content")
+            except Exception as e:
+                user_question = None
+            
+            # Add user question to the escalation data
+            # Convert to dict and add the user_question field
+            esc_dict = {}
+            if isinstance(esc, dict):
+                esc_dict.update(esc)
+            else:
+                esc_dict = dict(esc)
+            
+            if user_question:
+                esc_dict["user_question"] = user_question
+            else:
+                # Fallback: if no user message found, use assistant message content (shouldn't happen normally)
+                esc_dict["user_question"] = assistant_msg.get("content")
+        else:
+            esc_dict = dict(esc) if isinstance(esc, dict) else {}
+            esc_dict.update(esc) if hasattr(esc, '__dict__') else None
+            esc_dict["user_question"] = None
+        
+        result.append(esc_dict)
+    
+    return result
+
+@app.get("/twins/{twin_id}/verified-qna")  # Removed response_model to allow dynamic fields
+async def list_twin_verified_qna(twin_id: str, visibility: Optional[str] = None, user=Depends(get_current_user)):
+    """
+    List all verified QnA entries for a twin.
+    Optional visibility filter: 'private', 'shared', 'public'
+    """
+    try:
+        qna_list = await list_verified_qna(twin_id, visibility, group_id=group_id)
+        # Format with citations and patches for each entry
+        result = []
+        for qna in qna_list:
+            try:
+                full_qna = await get_verified_qna(qna["id"])
+                if full_qna:
+                    result.append(full_qna)
+            except Exception as e:
+                # Log error but continue processing other entries
+                print(f"Error fetching full QnA for {qna.get('id')}: {e}")
+                # Still include the basic QnA entry even if fetching full details fails
+                result.append(qna)
+        return result
+    except Exception as e:
+        import traceback
+        print(f"Error listing verified QnA: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/verified-qna/{qna_id}", response_model=VerifiedQnASchema)
+async def get_verified_qna_endpoint(qna_id: str, user=Depends(get_current_user)):
+    """
+    Get specific verified QnA with citations and patch history.
+    """
+    try:
+        qna = await get_verified_qna(qna_id)
+        if not qna:
+            raise HTTPException(status_code=404, detail="Verified QnA not found")
+        return qna
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.patch("/verified-qna/{qna_id}")
+async def update_verified_qna(qna_id: str, request: VerifiedQnAUpdateRequest, user=Depends(verify_owner)):
+    """
+    Edit verified answer (creates patch entry for version history).
+    Body: { "answer": "...", "reason": "..." }
+    """
+    try:
+        await edit_verified_qna(
+            qna_id=qna_id,
+            new_answer=request.answer,
+            reason=request.reason,
+            owner_id=user.get("user_id")
+        )
+        return {"status": "success", "message": "Verified QnA updated"}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/verified-qna/{qna_id}")
+async def delete_verified_qna(qna_id: str, user=Depends(verify_owner)):
+    """
+    Soft delete verified QnA (set is_active = false).
+    Optionally purges from Pinecone (future enhancement).
+    Note: verify_owner dependency already ensures user is an owner.
+    """
+    try:
+        # Check if QnA exists
+        qna_res = supabase.table("verified_qna").select("twin_id, twins(tenant_id)").eq("id", qna_id).single().execute()
+        if not qna_res.data:
+            raise HTTPException(status_code=404, detail="Verified QnA not found")
+        
+        # Verify the QnA belongs to a twin in the user's tenant
+        twin_tenant_id = qna_res.data.get("twins", {}).get("tenant_id")
+        if twin_tenant_id and twin_tenant_id != user.get("tenant_id"):
+            raise HTTPException(status_code=403, detail="Verified QnA does not belong to your tenant")
+        
+        # Soft delete
+        supabase.table("verified_qna").update({"is_active": False}).eq("id", qna_id).execute()
+        
+        # TODO: Optionally purge from Pinecone by searching for matching vectors
+        # This would require storing vector_id in verified_qna or searching by metadata
+        
+        return {"status": "success", "message": "Verified QnA deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# Access Groups API Endpoints
+# ============================================================================
+
+@app.get("/twins/{twin_id}/access-groups")
+async def list_access_groups(twin_id: str, user=Depends(verify_owner)):
+    """
+    List all access groups for a twin.
+    """
+    try:
+        groups = await list_groups(twin_id)
+        return groups
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/twins/{twin_id}/access-groups")
+async def create_access_group(
+    twin_id: str, 
+    request: GroupCreateRequest, 
+    user=Depends(verify_owner)
+):
+    """
+    Create a new access group for a twin.
+    """
+    try:
+        group_id = await create_group(
+            twin_id=twin_id,
+            name=request.name,
+            description=request.description,
+            is_public=request.is_public,
+            settings=request.settings or {}
+        )
+        group = await get_group(group_id)
+        return group
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/access-groups/{group_id}")
+async def get_access_group(group_id: str, user=Depends(get_current_user)):
+    """
+    Get access group details.
+    """
+    try:
+        group = await get_group(group_id)
+        if not group:
+            raise HTTPException(status_code=404, detail="Access group not found")
+        return group
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.patch("/access-groups/{group_id}")
+async def update_access_group(
+    group_id: str, 
+    request: GroupUpdateRequest, 
+    user=Depends(verify_owner)
+):
+    """
+    Update access group.
+    """
+    try:
+        updates = {k: v for k, v in request.model_dump().items() if v is not None}
+        if not updates:
+            raise HTTPException(status_code=400, detail="No fields to update")
+        
+        await update_group(group_id, updates)
+        group = await get_group(group_id)
+        return group
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/access-groups/{group_id}")
+async def delete_access_group(group_id: str, user=Depends(verify_owner)):
+    """
+    Delete an access group (cannot delete default group).
+    """
+    try:
+        await delete_group(group_id)
+        return {"message": "Access group deleted successfully"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/access-groups/{group_id}/members")
+async def list_group_members(group_id: str, user=Depends(get_current_user)):
+    """
+    List all members of an access group.
+    """
+    try:
+        members = await get_group_members(group_id)
+        return members
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/twins/{twin_id}/group-memberships")
+async def assign_user_to_group_endpoint(
+    twin_id: str,
+    request: AssignUserRequest,
+    user=Depends(verify_owner)
+):
+    """
+    Assign user to a group (replaces existing membership for that twin).
+    """
+    try:
+        from modules.access_groups import assign_user_to_group as assign_user
+        await assign_user(request.user_id, twin_id, request.group_id)
+        return {"message": "User assigned to group successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.delete("/group-memberships/{membership_id}")
+async def remove_group_membership(
+    membership_id: str, 
+    user=Depends(verify_owner)
+):
+    """
+    Remove user from group (deactivate membership).
+    """
+    try:
+        supabase.table("group_memberships").update({"is_active": False}).eq("id", membership_id).execute()
+        return {"message": "User removed from group successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/access-groups/{group_id}/permissions")
+async def grant_content_permissions(
+    group_id: str,
+    request: ContentPermissionRequest,
+    user=Depends(verify_owner)
+):
+    """
+    Grant group access to content (sources or verified QnA).
+    """
+    try:
+        # Get twin_id from group
+        group = await get_group(group_id)
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
+        twin_id = group["twin_id"]
+        
+        # Grant permissions for each content_id
+        for content_id in request.content_ids:
+            await add_content_permission(group_id, request.content_type, content_id, twin_id)
+        
+        return {"message": f"Granted access to {len(request.content_ids)} content item(s)"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.delete("/access-groups/{group_id}/permissions/{content_type}/{content_id}")
+async def revoke_content_permission(
+    group_id: str,
+    content_type: str,
+    content_id: str,
+    user=Depends(verify_owner)
+):
+    """
+    Revoke group access to specific content.
+    """
+    try:
+        await remove_content_permission(group_id, content_type, content_id)
+        return {"message": "Permission revoked successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/access-groups/{group_id}/permissions")
+async def list_group_permissions(group_id: str, user=Depends(get_current_user)):
+    """
+    List all content accessible to a group.
+    """
+    try:
+        permissions = await get_group_permissions(group_id)
+        return permissions
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/content/{content_type}/{content_id}/groups")
+async def get_content_groups(
+    content_type: str,
+    content_id: str,
+    user=Depends(get_current_user)
+):
+    """
+    Get all groups that have access to specific content.
+    """
+    try:
+        group_ids = await get_groups_for_content(content_type, content_id)
+        # Fetch group details
+        groups = []
+        for gid in group_ids:
+            group = await get_group(gid)
+            if group:
+                groups.append(group)
+        return groups
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/access-groups/{group_id}/limits")
+async def set_group_limit_endpoint(
+    group_id: str,
+    limit_type: str = Query(...),
+    limit_value: int = Query(...),
+    user=Depends(verify_owner)
+):
+    """
+    Set a limit for a group.
+    Query params: limit_type, limit_value
+    """
+    try:
+        await set_group_limit(group_id, limit_type, limit_value)
+        return {"message": f"Limit {limit_type} set to {limit_value}"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/access-groups/{group_id}/limits")
+async def list_group_limits(group_id: str, user=Depends(get_current_user)):
+    """
+    List all limits for a group.
+    """
+    try:
+        limits = await get_group_limits(group_id)
+        return limits
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/access-groups/{group_id}/overrides")
+async def set_group_override_endpoint(
+    group_id: str,
+    request: Dict[str, Any],
+    user=Depends(verify_owner)
+):
+    """
+    Set an override for a group.
+    Body: { "override_type": "...", "override_value": ... }
+    override_type: 'system_prompt', 'temperature', 'max_tokens', 'tool_access'
+    """
+    try:
+        override_type = request.get("override_type")
+        override_value = request.get("override_value")
+        if not override_type or override_value is None:
+            raise HTTPException(status_code=400, detail="override_type and override_value are required")
+        await set_group_override(group_id, override_type, override_value)
+        return {"message": f"Override {override_type} set successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/access-groups/{group_id}/overrides")
+async def list_group_overrides(group_id: str, user=Depends(get_current_user)):
+    """
+    List all overrides for a group.
+    """
+    try:
+        overrides = await get_group_overrides(group_id)
+        return overrides
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 import socket
 

@@ -1,5 +1,5 @@
 import os
-from typing import Annotated, TypedDict, List, Dict, Any, Union
+from typing import Annotated, TypedDict, List, Dict, Any, Union, Optional
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langgraph.graph import StateGraph, END
@@ -110,15 +110,40 @@ class TwinState(TypedDict):
     confidence_score: float
     citations: List[str]
 
-def create_twin_agent(twin_id: str, system_prompt_override: str = None, full_settings: dict = None):
+def create_twin_agent(twin_id: str, group_id: Optional[str] = None, system_prompt_override: str = None, full_settings: dict = None):
     # Initialize the LLM
     api_key = os.getenv("OPENAI_API_KEY")
+    
+    # Extract tool_access override if present from full_settings
+    # (group settings should already be merged in run_agent_stream)
+    allowed_tools = None
+    if full_settings and "tool_access" in full_settings:
+        tool_access_config = full_settings.get("tool_access", {})
+        if isinstance(tool_access_config, list):
+            allowed_tools = tool_access_config
+        elif isinstance(tool_access_config, dict) and "allowed_tools" in tool_access_config:
+            allowed_tools = tool_access_config["allowed_tools"]
+    
+    # Ensure full_settings is a dict
+    if full_settings is None:
+        full_settings = {}
+    
+    # Apply group overrides for specific fields
+    temperature = full_settings.get("temperature") if "temperature" in full_settings else 0
+    max_tokens = full_settings.get("max_tokens")
+    
     # Using a model that supports tool calling well
-    llm = ChatOpenAI(model="gpt-4-turbo-preview", api_key=api_key, temperature=0, streaming=True)
+    llm = ChatOpenAI(
+        model="gpt-4-turbo-preview", 
+        api_key=api_key, 
+        temperature=temperature, 
+        streaming=True,
+        max_tokens=max_tokens if max_tokens else None
+    )
     
     # Setup tools
-    retrieval_tool = get_retrieval_tool(twin_id)
-    cloud_tools = get_cloud_tools()
+    retrieval_tool = get_retrieval_tool(twin_id, group_id=group_id)
+    cloud_tools = get_cloud_tools(allowed_tools=allowed_tools)
     tools = [retrieval_tool] + cloud_tools
     
     # Bind tools to the LLM
@@ -138,6 +163,17 @@ def create_twin_agent(twin_id: str, system_prompt_override: str = None, full_set
             exemplars = settings.get("style_exemplars", [])
             opinion_map = settings.get("opinion_map", {})
             
+            # Check for general_knowledge_allowed setting
+            general_knowledge_allowed = settings.get("general_knowledge_allowed", False)
+            
+            # Check for group-specific system prompt override
+            # Use the outer function's system_prompt_override, or fall back to group settings
+            effective_system_prompt = system_prompt_override
+            if not effective_system_prompt:
+                group_system_prompt = settings.get("system_prompt")
+                if group_system_prompt:
+                    effective_system_prompt = group_system_prompt
+            
             persona_section = f"""YOUR PERSONA STYLE:
             - DESCRIPTION: {style_desc}"""
             
@@ -152,24 +188,27 @@ def create_twin_agent(twin_id: str, system_prompt_override: str = None, full_set
                 opinions_text = "\n              ".join([f"- {topic}: {data['stance']} (Intensity: {data['intensity']}/10)" for topic, data in opinion_map.items()])
                 persona_section += f"\n            - CORE WORLDVIEW / OPINIONS (Always stay consistent with these):\n              {opinions_text}"
 
-            system_prompt = system_prompt_override or f"""You are the AI Digital Twin of the owner (ID: {twin_id}). 
+            general_knowledge_note = "You may use general knowledge if allowed in settings." if general_knowledge_allowed else "Do NOT make things up or use general knowledge - only respond with verified information."
+            
+            system_prompt = effective_system_prompt or f"""You are the AI Digital Twin of the owner (ID: {twin_id}). 
             Your primary intelligence comes from the `search_knowledge_base` tool.
 
             {persona_section}
 
             CRITICAL OPERATING PROCEDURES:
             1. Factual Questions: For ANY question about facts, opinions, history, or documents, you MUST FIRST call `search_knowledge_base`.
-            2. Verified Info: If search returns "is_verified": True, this is the owner's direct word. Use it exactly.
-            3. Persona & Voice:
+            2. Verified QnA Priority: If search returns ANY result with "verified_qna_match": true or "is_verified": true, this is a verified answer from the owner. YOUR RESPONSE MUST BE THE EXACT TEXT FROM THE "text" FIELD - COPY IT VERBATIM. Do not paraphrase, modify, add to, or rephrase it in any way. Just return the exact "text" value as your complete response.
+            3. Verified Info: If search returns "is_verified": true, copy the exact "text" field value as your response. No modifications allowed.
+            4. Persona & Voice:
                - Sources have a 'category' (FACT or OPINION), a 'tone', and potentially an 'opinion_topic' and 'opinion_stance'.
                - If a source is an 'OPINION', use first-person framing like 'In my view' or 'I personally believe'.
                - If an 'opinion_stance' is provided for an 'OPINION', strictly adhere to that stance.
                - If a source is a 'FACT', state it directly as objective information.
                - Adopt the 'tone' (e.g., Thoughtful, Assertive) found in the relevant source to match the owner's style.
-            4. No Data: If the tool returns no relevant information, explicitly state: "I don't have this specific information in my knowledge base." Do NOT make things up.
-            5. Citations: Always cite your sources using [Source ID] when using tool results.
-            6. Personal Identity: Speak in the first person ("I", "my") as if you are the owner, but grounded in the verified data.
-            7. Greetings: For simple greetings like "Hi" or "How are you?", you may respond briefly without searching, but for anything else, SEARCH.
+            5. No Data: If the tool returns no relevant information OR returns empty results with weak retrieval scores (< 0.5), you MUST respond with: "I don't have this specific information in my knowledge base." {general_knowledge_note}
+            6. Citations: Always cite your sources using [Source ID] when using tool results. For verified QnA, use the citations provided.
+            7. Personal Identity: Speak in the first person ("I", "my") as if you are the owner, but grounded in the verified data.
+            8. ALWAYS SEARCH: Always call search_knowledge_base first, even for simple greetings. If a verified answer exists, use it exactly.
 
             Current Twin ID: {twin_id}"""
             messages = [SystemMessage(content=system_prompt)] + messages
@@ -220,14 +259,19 @@ def create_twin_agent(twin_id: str, system_prompt_override: str = None, full_set
         # If tools were called but no scores found, it might mean empty results
         # We should reflect that in the confidence
         if score_count > 0:
-            # Check if any verified answer was found
-            has_verified = any("is_verified" in msg.content and '"is_verified": true' in msg.content for msg in result["messages"] if isinstance(msg, ToolMessage))
+            # Check if any verified answer was found (verified_qna_match or is_verified)
+            has_verified = any(
+                ("verified_qna_match" in msg.content and '"verified_qna_match": true' in msg.content) or
+                ("is_verified" in msg.content and '"is_verified": true' in msg.content)
+                for msg in result["messages"] 
+                if isinstance(msg, ToolMessage)
+            )
             if has_verified:
                 new_confidence = 1.0 # Force 100% confidence if owner verified info is found
             else:
                 new_confidence = total_score / score_count
         else:
-            # If search tool was called but returned nothing, confidence is 0
+            # If search tool was called but returned nothing, confidence is 0 (triggers "I don't know")
             new_confidence = 0.0
         
         return {
@@ -268,7 +312,7 @@ def create_twin_agent(twin_id: str, system_prompt_override: str = None, full_set
     # Compile the graph
     return workflow.compile()
 
-async def run_agent_stream(twin_id: str, query: str, history: List[BaseMessage] = None, system_prompt: str = None):
+async def run_agent_stream(twin_id: str, query: str, history: List[BaseMessage] = None, system_prompt: str = None, group_id: Optional[str] = None):
     """
     Runs the agent and yields events from the graph.
     """
@@ -276,14 +320,32 @@ async def run_agent_stream(twin_id: str, query: str, history: List[BaseMessage] 
     twin_res = supabase.table("twins").select("settings").eq("id", twin_id).single().execute()
     settings = twin_res.data["settings"] if twin_res.data else {}
     
-    # 2. Ensure style analysis has been run at least once
+    # 2. Load group settings if group_id provided
+    if group_id:
+        try:
+            from modules.access_groups import get_group_settings
+            group_settings = await get_group_settings(group_id)
+            # Merge group settings with twin settings (group takes precedence)
+            settings = {**settings, **group_settings}
+        except Exception as e:
+            print(f"Warning: Failed to load group settings: {e}")
+    
+    # 3. Ensure style analysis has been run at least once
     if "persona_profile" not in settings:
         await get_owner_style_profile(twin_id)
         # Re-fetch after analysis
         twin_res = supabase.table("twins").select("settings").eq("id", twin_id).single().execute()
         settings = twin_res.data["settings"] if twin_res.data else {}
+        # Re-merge group settings if needed
+        if group_id:
+            try:
+                from modules.access_groups import get_group_settings
+                group_settings = await get_group_settings(group_id)
+                settings = {**settings, **group_settings}
+            except Exception:
+                pass
 
-    agent = create_twin_agent(twin_id, system_prompt_override=system_prompt, full_settings=settings)
+    agent = create_twin_agent(twin_id, group_id=group_id, system_prompt_override=system_prompt, full_settings=settings)
     
     initial_messages = history or []
     initial_messages.append(HumanMessage(content=query))

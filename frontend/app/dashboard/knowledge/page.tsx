@@ -8,6 +8,7 @@ interface Source {
   file_size: number;
   status: string;
   created_at: string;
+  groups?: Array<{ id: string; name: string }>;
 }
 
 interface KnowledgeProfile {
@@ -411,7 +412,19 @@ export default function KnowledgePage() {
                 {sources.map((s) => (
                   <tr key={s.id} className="hover:bg-slate-50/50 transition-colors group">
                     <td className="px-8 py-6">
-                      <div className="font-bold text-slate-800 text-sm truncate max-w-sm">{s.filename}</div>
+                      <div className="font-bold text-slate-800 text-sm truncate max-w-sm mb-1">{s.filename}</div>
+                      {s.groups && s.groups.length > 0 && (
+                        <div className="flex gap-1 flex-wrap mt-1">
+                          {s.groups.map((group: { id: string; name: string }) => (
+                            <span
+                              key={group.id}
+                              className="px-2 py-0.5 text-xs bg-blue-100 text-blue-800 rounded"
+                            >
+                              {group.name}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </td>
                     <td className="px-8 py-6">
                       {s.filename.startsWith('YouTube:') ? (

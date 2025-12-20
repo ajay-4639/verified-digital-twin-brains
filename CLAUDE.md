@@ -54,11 +54,14 @@ npm run dev
 ## System Dependencies
 
 ### Supabase Tables
-- `twins`: (id, name, owner_id, settings)
+- `twins`: (id, tenant_id, name, description, settings, created_at)
 - `sources`: (id, twin_id, filename, file_size, status, created_at)
 - `conversations`: (id, twin_id, user_id, created_at)
 - `messages`: (id, conversation_id, role, content, confidence_score, citations, created_at)
 - `escalations`: (id, message_id, status, resolved_by, resolved_at)
+- `verified_qna`: (id, twin_id, question, answer, question_embedding, visibility, created_by, created_at, updated_at, is_active)
+- `answer_patches`: (id, verified_qna_id, previous_answer, new_answer, reason, patched_by, patched_at)
+- `citations`: (id, verified_qna_id, source_id, chunk_id, citation_url, created_at)
 
 ### Pinecone Configuration
 - **Metric**: Cosine

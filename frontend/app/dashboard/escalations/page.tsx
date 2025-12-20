@@ -8,6 +8,8 @@ export default function EscalationsPage() {
   const [loading, setLoading] = useState(true);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [ownerAnswers, setOwnerAnswers] = useState<Record<string, string>>({});
+  const [citations, setCitations] = useState<Record<string, string>>({});
+  const [showPreview, setShowPreview] = useState<Record<string, boolean>>({});
 
   const fetchEscalations = async () => {
     try {
@@ -45,10 +47,21 @@ export default function EscalationsPage() {
       });
 
       if (response.ok) {
+        const result = await response.json();
         // Refresh the list
         fetchEscalations();
-        // Clear answer for this id
+        // Clear answer and citations for this id
         setOwnerAnswers(prev => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        setCitations(prev => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        setShowPreview(prev => {
           const next = { ...prev };
           delete next[id];
           return next;
@@ -72,6 +85,7 @@ export default function EscalationsPage() {
             <Link href="/dashboard" className="text-sm font-medium text-slate-500 hover:text-slate-800">Chat</Link>
             <a href="#" className="text-sm font-medium text-slate-500 hover:text-slate-800">Knowledge Base</a>
             <Link href="/dashboard/escalations" className="text-sm font-bold text-blue-600 border-b-2 border-blue-600 pb-1">Escalations</Link>
+            <Link href="/dashboard/verified-qna" className="text-sm font-medium text-slate-500 hover:text-slate-800">Verified QnA</Link>
             <Link href="/dashboard/settings" className="text-sm font-medium text-slate-500 hover:text-slate-800">Settings</Link>
             <a href="#" className="text-sm font-medium text-slate-500 hover:text-slate-800">Analytics</a>
           </nav>
@@ -112,9 +126,15 @@ export default function EscalationsPage() {
                 </div>
                 <div className="space-y-4">
                   <div>
-                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Low Confidence Answer</div>
-                    <div className="text-sm bg-slate-50 p-4 rounded-xl border border-slate-100 italic text-slate-600">
-                      "{esc.messages?.content}"
+                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Original Question</div>
+                    <div className="text-sm bg-blue-50 p-4 rounded-xl border border-blue-100 text-slate-700">
+                      "{esc.user_question || esc.messages?.content}"
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Low Confidence Answer Given</div>
+                    <div className="text-sm bg-red-50 p-4 rounded-xl border border-red-100 italic text-slate-600">
+                      This answer had low confidence and was escalated for review.
                     </div>
                   </div>
                   <div>
@@ -132,30 +152,70 @@ export default function EscalationsPage() {
 
                   {esc.status === 'open' && (
                     <div className="pt-4 mt-4 border-t border-slate-50">
-                      <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Your Verified Answer</div>
-                      <textarea
-                        className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all resize-none"
-                        placeholder="Provide the correct information to train your twin..."
-                        rows={3}
-                        value={ownerAnswers[esc.id] || ''}
-                        onChange={(e) => setOwnerAnswers({ ...ownerAnswers, [esc.id]: e.target.value })}
-                      />
-                      <div className="flex justify-end mt-3">
-                        <button
-                          onClick={() => handleResolve(esc.id)}
-                          disabled={resolvingId === esc.id || !ownerAnswers[esc.id]?.trim()}
-                          className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white text-xs font-bold py-2 px-6 rounded-lg transition-colors shadow-sm"
-                        >
-                          {resolvingId === esc.id ? 'Saving...' : 'Verify & Add to Memory'}
-                        </button>
+                      <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Approve as Verified Answer</div>
+                      <div className="space-y-3">
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-600 mb-1">Question (auto-populated)</label>
+                          <div className="text-sm bg-slate-50 p-3 rounded-lg border border-slate-200 text-slate-700">
+                            {esc.user_question || esc.messages?.content}
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-600 mb-1">Your Verified Answer *</label>
+                          <textarea
+                            className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all resize-none"
+                            placeholder="Provide the correct information to train your twin..."
+                            rows={4}
+                            value={ownerAnswers[esc.id] || ''}
+                            onChange={(e) => setOwnerAnswers({ ...ownerAnswers, [esc.id]: e.target.value })}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-600 mb-1">Citations (optional, comma-separated source IDs)</label>
+                          <input
+                            type="text"
+                            className="w-full p-3 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                            placeholder="source1, source2, ..."
+                            value={citations[esc.id] || ''}
+                            onChange={(e) => setCitations({ ...citations, [esc.id]: e.target.value })}
+                          />
+                        </div>
+                        {ownerAnswers[esc.id]?.trim() && (
+                          <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                            <div className="text-xs font-semibold text-green-800 mb-2">Preview:</div>
+                            <div className="text-sm text-green-900">
+                              <div className="font-medium mb-1">Q: {esc.user_question || esc.messages?.content}</div>
+                              <div>A: {ownerAnswers[esc.id]}</div>
+                            </div>
+                          </div>
+                        )}
+                        <div className="flex justify-end gap-3">
+                          <button
+                            onClick={() => handleResolve(esc.id)}
+                            disabled={resolvingId === esc.id || !ownerAnswers[esc.id]?.trim()}
+                            className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white text-xs font-bold py-2 px-6 rounded-lg transition-colors shadow-sm"
+                          >
+                            {resolvingId === esc.id ? 'Saving...' : 'Verify & Add to Memory'}
+                          </button>
+                        </div>
                       </div>
                     </div>
                   )}
                   
                   {esc.status === 'resolved' && (
-                    <div className="pt-4 mt-4 border-t border-slate-50 flex items-center gap-2 text-green-600">
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg>
-                      <span className="text-[10px] font-black uppercase tracking-widest">Knowledge Verified</span>
+                    <div className="pt-4 mt-4 border-t border-slate-50">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-green-600">
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg>
+                          <span className="text-[10px] font-black uppercase tracking-widest">Knowledge Verified</span>
+                        </div>
+                        <Link 
+                          href="/dashboard/verified-qna"
+                          className="text-blue-600 text-xs font-bold hover:underline"
+                        >
+                          Edit Verified Answer →
+                        </Link>
+                      </div>
                     </div>
                   )}
                 </div>

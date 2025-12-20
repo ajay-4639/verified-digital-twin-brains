@@ -10,8 +10,17 @@ supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
 # Fallback to anon key if service key is placeholder or missing
 if not supabase_key or "your_supabase_service_role_key" in supabase_key:
     supabase_key = os.getenv("SUPABASE_KEY")
-    
-supabase: Client = create_client(supabase_url, supabase_key)
+
+# Validate environment variables before creating client
+if not supabase_url:
+    raise ValueError("SUPABASE_URL environment variable is not set. Please check your .env file.")
+if not supabase_key:
+    raise ValueError("SUPABASE_KEY or SUPABASE_SERVICE_KEY environment variable is not set. Please check your .env file.")
+
+try:
+    supabase: Client = create_client(supabase_url, supabase_key)
+except Exception as e:
+    raise ValueError(f"Failed to initialize Supabase client: {e}. Please check your SUPABASE_URL and SUPABASE_KEY environment variables.")
 
 def create_conversation(twin_id: str, user_id: str = None):
     data = {"twin_id": twin_id}

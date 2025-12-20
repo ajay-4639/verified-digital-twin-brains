@@ -1,7 +1,10 @@
 import os
 import asyncio
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from modules.clients import get_openai_client, get_pinecone_index, get_cohere_client
+from modules.verified_qna import match_verified_qna
+from modules.observability import supabase
+from modules.access_groups import get_default_group
 
 def get_embedding(text: str):
     """
@@ -114,13 +117,48 @@ def rrf_merge(results_list: List[List[Dict[str, Any]]], k: int = 60) -> List[Dic
         
     return final_results
 
-async def retrieve_context(query: str, twin_id: str, top_k: int = 5):
+async def retrieve_context_with_verified_first(query: str, twin_id: str, group_id: Optional[str] = None, top_k: int = 5):
     """
-    Optimized retrieval pipeline using HyDE, Query Expansion, and RRF.
+    Retrieval pipeline with verified-first order: Check verified QnA → vectors → tools.
+    Returns contexts with verified_qna_match flag if verified answer found.
+    If group_id is None, uses default group for backward compatibility.
     """
-    # Log for debugging
-    print(f"Retrieving context for twin {twin_id} with query: {query}")
+    # Resolve group_id to default if None
+    if group_id is None:
+        try:
+            default_group = await get_default_group(twin_id)
+            group_id = default_group["id"]
+        except Exception:
+            # If no default group exists, proceed without group filtering (backward compatibility)
+            group_id = None
     
+    # STEP 1: Check Verified QnA first (highest priority)
+    verified_match = await match_verified_qna(query, twin_id, group_id=group_id, use_exact=True, use_semantic=False, exact_threshold=0.7)
+    
+    if verified_match and verified_match.get("similarity_score", 0) >= 0.7:
+        # Found a high-confidence verified answer - return immediately
+        return [{
+            "text": verified_match["answer"],
+            "score": 1.0,  # Perfect confidence for verified answers
+            "source_id": f"verified_qna_{verified_match['id']}",
+            "is_verified": True,
+            "verified_qna_match": True,
+            "question": verified_match["question"],
+            "category": "FACT",
+            "tone": "Assertive",
+            "citations": verified_match.get("citations", [])
+        }]
+    
+    # STEP 2: No verified match - proceed with vector retrieval
+    return await retrieve_context_vectors(query, twin_id, group_id=group_id, top_k=top_k)
+
+
+async def retrieve_context_vectors(query: str, twin_id: str, group_id: Optional[str] = None, top_k: int = 5):
+    """
+    Optimized retrieval pipeline using HyDE, Query Expansion, and RRF (vector-only).
+    Used when no verified QnA match is found.
+    If group_id is provided, filters results by group permissions.
+    """
     # 1. Parallel Query Expansion & HyDE
     expanded_task = expand_query(query)
     hyde_task = generate_hyde_answer(query)
@@ -128,7 +166,6 @@ async def retrieve_context(query: str, twin_id: str, top_k: int = 5):
     expanded_queries, hyde_answer = await asyncio.gather(expanded_task, hyde_task)
     
     search_queries = list(set([query, hyde_answer] + expanded_queries))
-    print(f"Searching with {len(search_queries)} variations: {search_queries}")
     
     # 2. Parallel Embedding Generation (Batch)
     all_embeddings = await get_embeddings_async(search_queries)
@@ -198,6 +235,39 @@ async def retrieve_context(query: str, twin_id: str, top_k: int = 5):
             "opinion_intensity": match["metadata"].get("opinion_intensity")
         })
     
+    # Filter by group permissions if group_id is provided
+    if group_id:
+        # Get allowed source_ids for this group (convert to strings for comparison)
+        permissions_response = supabase.table("content_permissions").select("content_id").eq(
+            "group_id", group_id
+        ).eq("content_type", "source").execute()
+        
+        allowed_source_ids = {str(perm["content_id"]) for perm in (permissions_response.data or [])}
+        
+        # Filter contexts to only include chunks from allowed sources
+        # Also allow verified memory (is_verified=True chunks) - they're always accessible
+        filtered_contexts = []
+        for c in contexts:
+            source_id = str(c.get("source_id", ""))
+            is_verified = c.get("is_verified", False)
+            
+            # Allow if verified memory OR if source_id matches an allowed source
+            if is_verified or source_id in allowed_source_ids:
+                filtered_contexts.append(c)
+        
+        contexts = filtered_contexts
+        
+        # Also filter raw_general_chunks for reranking
+        filtered_raw_chunks = []
+        for c in raw_general_chunks:
+            source_id = str(c.get("source_id", ""))
+            is_verified = c.get("is_verified", False)
+            
+            if is_verified or source_id in allowed_source_ids:
+                filtered_raw_chunks.append(c)
+        
+        raw_general_chunks = filtered_raw_chunks
+    
     # 5. Reranking Step
     cohere_client = get_cohere_client()
     if cohere_client and raw_general_chunks:
@@ -239,4 +309,23 @@ async def retrieve_context(query: str, twin_id: str, top_k: int = 5):
     final_contexts = final_contexts[:top_k]
     
     print(f"Found {len(final_contexts)} contexts for {twin_id}")
+    
+    # Check if retrieval is too weak - signal for "I don't know" response
+    max_score = max([c.get("score", 0.0) for c in final_contexts], default=0.0)
+    if max_score < 0.5 and len(final_contexts) == 0:
+        # Return empty with flag for "I don't know"
+        return []
+    
+    # Add verified_qna_match flag (False since we didn't find verified match)
+    for c in final_contexts:
+        c["verified_qna_match"] = False
+    
     return final_contexts
+
+
+async def retrieve_context(query: str, twin_id: str, group_id: Optional[str] = None, top_k: int = 5):
+    """
+    Main retrieval function - uses verified-first order.
+    Backward compatible wrapper around retrieve_context_with_verified_first.
+    """
+    return await retrieve_context_with_verified_first(query, twin_id, group_id=group_id, top_k=top_k)

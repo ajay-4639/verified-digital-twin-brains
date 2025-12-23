@@ -82,7 +82,6 @@ def enqueue_job(job_id: str, job_type: str, priority: int = 0, metadata: Optiona
             })
     else:
         # In-memory fallback using heapq (min-heap, so we negate priority)
-        global _in_memory_queue
         heapq.heappush(_in_memory_queue, (-priority, job_id, job_type, metadata or {}))
 
 
@@ -127,7 +126,6 @@ def dequeue_job() -> Optional[Dict[str, Any]]:
         }
     else:
         # In-memory fallback
-        global _in_memory_queue
         if not _in_memory_queue:
             return None
         
@@ -147,7 +145,6 @@ def get_queue_length() -> int:
     if client:
         return client.zcard("training_jobs_queue")
     else:
-        global _in_memory_queue
         return len(_in_memory_queue)
 
 

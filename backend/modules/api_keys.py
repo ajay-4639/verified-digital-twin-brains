@@ -64,6 +64,9 @@ def create_api_key(
     
     key_record = response.data[0]
     
+    # Phase 9: Log the action
+    AuditLogger.log(twin_id, "CONFIGURATION_CHANGE", "API_KEY_CREATED", metadata={"name": name, "key_id": key_record["id"]})
+    
     # Return the full key only once (caller should display it immediately)
     return {
         "id": key_record["id"],
@@ -73,11 +76,6 @@ def create_api_key(
         "created_at": key_record.get("created_at"),
         "expires_at": expires_at.isoformat() if expires_at else None
     }
-    
-    # Phase 9: Log the action
-    AuditLogger.log(twin_id, "CONFIGURATION_CHANGE", "API_KEY_CREATED", metadata={"name": name, "key_id": key_record["id"]})
-    
-    return result
 
 
 def validate_api_key(key: str) -> Optional[Dict[str, Any]]:

@@ -35,9 +35,10 @@ export async function middleware(request: NextRequest) {
     const isPublicPage = request.nextUrl.pathname === '/' ||
         request.nextUrl.pathname.startsWith('/share/');
     const isDashboard = request.nextUrl.pathname.startsWith('/dashboard');
+    const isOnboarding = request.nextUrl.pathname.startsWith('/onboarding');
 
     // If user is not logged in and trying to access protected route
-    if (!session && isDashboard) {
+    if (!session && (isDashboard || isOnboarding)) {
         const redirectUrl = new URL('/auth/login', request.url);
         redirectUrl.searchParams.set('redirect', request.nextUrl.pathname);
         return NextResponse.redirect(redirectUrl);
@@ -45,6 +46,8 @@ export async function middleware(request: NextRequest) {
 
     // If user is logged in and trying to access auth pages
     if (session && isAuthPage) {
+        // Check if user needs onboarding (first-time user)
+        // We'll use a cookie to track this, actual check happens on dashboard
         return NextResponse.redirect(new URL('/dashboard', request.url));
     }
 

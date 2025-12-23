@@ -6,33 +6,70 @@ import { getSupabaseClient } from '@/lib/supabase/client';
 import {
     Wizard,
     WelcomeStep,
-    CreateTwinStep,
+    ClaimIdentityStep,
+    DefineExpertiseStep,
     AddContentStep,
-    TrainingStep,
-    FirstChatStep
+    SeedFAQsStep,
+    SetPersonalityStep,
+    PreviewTwinStep,
+    LaunchStep
 } from '@/components/onboarding';
 
+// 8-Step Delphi-Style Onboarding
 const WIZARD_STEPS = [
     { id: 'welcome', title: 'Welcome', description: 'Get started', icon: '👋' },
-    { id: 'create', title: 'Create', description: 'Name your twin', icon: '✏️' },
-    { id: 'content', title: 'Content', description: 'Add files', icon: '📚' },
-    { id: 'interview', title: 'Interview', description: 'Train your twin', icon: '🧠' },
-    { id: 'complete', title: 'Complete', description: 'Get started', icon: '�' },
+    { id: 'identity', title: 'Identity', description: 'Claim your name', icon: '✨' },
+    { id: 'expertise', title: 'Expertise', description: 'Define domains', icon: '🎯' },
+    { id: 'content', title: 'Content', description: 'Add knowledge', icon: '📚' },
+    { id: 'faqs', title: 'FAQs', description: 'Seed answers', icon: '❓' },
+    { id: 'personality', title: 'Personality', description: 'Set tone', icon: '🎭' },
+    { id: 'preview', title: 'Preview', description: 'Test twin', icon: '👁️' },
+    { id: 'launch', title: 'Launch', description: 'Go live', icon: '🚀' },
 ];
+
+interface PersonalitySettings {
+    tone: 'professional' | 'friendly' | 'casual' | 'technical';
+    responseLength: 'concise' | 'balanced' | 'detailed';
+    firstPerson: boolean;
+    customInstructions: string;
+}
+
+interface FAQPair {
+    question: string;
+    answer: string;
+}
 
 export default function OnboardingPage() {
     const router = useRouter();
     const supabase = getSupabaseClient();
 
+    // State
     const [currentStep, setCurrentStep] = useState(0);
+    const [twinId, setTwinId] = useState<string | null>(null);
+
+    // Step 2: Identity
     const [twinName, setTwinName] = useState('');
-    const [twinPurpose, setTwinPurpose] = useState('');
+    const [handle, setHandle] = useState('');
+    const [tagline, setTagline] = useState('');
+
+    // Step 3: Expertise
+    const [selectedDomains, setSelectedDomains] = useState<string[]>([]);
+    const [customExpertise, setCustomExpertise] = useState<string[]>([]);
+
+    // Step 4: Content
     const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
     const [pendingUrls, setPendingUrls] = useState<string[]>([]);
-    const [isTraining, setIsTraining] = useState(false);
-    const [trainingProgress, setTrainingProgress] = useState(0);
-    const [twinId, setTwinId] = useState<string | null>(null);
-    const [interviewData, setInterviewData] = useState<Record<string, string>>({});
+
+    // Step 5: FAQs
+    const [faqs, setFaqs] = useState<FAQPair[]>([]);
+
+    // Step 6: Personality
+    const [personality, setPersonality] = useState<PersonalitySettings>({
+        tone: 'friendly',
+        responseLength: 'balanced',
+        firstPerson: true,
+        customInstructions: ''
+    });
 
     // Check if should skip onboarding (returning user with existing twins)
     useEffect(() => {
@@ -43,7 +80,6 @@ export default function OnboardingPage() {
                 .limit(1);
 
             if (twins && twins.length > 0) {
-                // User already has twins, redirect to dashboard
                 router.push('/dashboard');
             }
         };
@@ -59,16 +95,24 @@ export default function OnboardingPage() {
     };
 
     const handleStepChange = async (newStep: number) => {
-        // Handle special step transitions
-        if (currentStep === 1 && newStep === 2 && twinName) {
-            // Create twin when leaving create step
+        // Create twin after identity step
+        if (currentStep === 1 && newStep === 2 && twinName && !twinId) {
             await createTwin();
         }
 
-        if (currentStep === 2 && newStep === 3) {
-            // Start training when leaving content step
+        // Upload content after content step
+        if (currentStep === 3 && newStep === 4 && twinId) {
             await uploadContent();
-            setIsTraining(true);
+        }
+
+        // Save FAQs after FAQ step
+        if (currentStep === 4 && newStep === 5 && twinId) {
+            await saveFaqs();
+        }
+
+        // Save personality after personality step
+        if (currentStep === 5 && newStep === 6 && twinId) {
+            await savePersonality();
         }
 
         setCurrentStep(newStep);
@@ -79,14 +123,28 @@ export default function OnboardingPage() {
             const { data: { user } } = await supabase.auth.getUser();
             if (!user) return;
 
+            const expertiseText = [...selectedDomains, ...customExpertise].join(', ');
+
+            const systemInstructions = `You are ${twinName}${tagline ? `, ${tagline}` : ''}.
+Your areas of expertise include: ${expertiseText || 'general topics'}.
+Communication style: ${personality.tone}, ${personality.responseLength} responses.
+${personality.firstPerson ? 'Speak in first person ("I believe...")' : `Refer to yourself as ${twinName}`}
+${personality.customInstructions ? `Additional instructions: ${personality.customInstructions}` : ''}`;
+
             const { data, error } = await supabase
                 .from('twins')
                 .insert({
                     name: twinName,
                     tenant_id: user.id,
                     owner_id: user.id,
-                    system_instructions: `You are ${twinName}, a digital twin with expertise in ${twinPurpose || 'general topics'}.`,
-                    specialization_id: 'vanilla'
+                    system_instructions: systemInstructions,
+                    specialization_id: 'vanilla',
+                    settings: {
+                        handle,
+                        tagline,
+                        expertise: [...selectedDomains, ...customExpertise],
+                        personality
+                    }
                 })
                 .select()
                 .single();
@@ -134,47 +192,76 @@ export default function OnboardingPage() {
         }
     };
 
-    const handleInterviewComplete = async (data: Record<string, string>) => {
-        setInterviewData(data);
+    const saveFaqs = async () => {
+        if (!twinId) return;
 
-        // Save interview data to backend as verified memory
-        if (twinId) {
-            try {
-                const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+        const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+        const { data: { user } } = await supabase.auth.getUser();
 
-                // Store each piece of collected data as verified knowledge
-                for (const [key, value] of Object.entries(data)) {
-                    if (value) {
-                        await fetch(`${backendUrl}/graph/nodes`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                twin_id: twinId,
-                                node_type: key.includes('background') ? 'profile.background' :
-                                    key.includes('expertise') ? 'profile.expertise_areas' :
-                                        key.includes('common') ? 'knowledge.common_questions' :
-                                            key.includes('insight') ? 'knowledge.key_insights' :
-                                                key.includes('perspective') ? 'profile.unique_perspective' :
-                                                    key.includes('communication') ? 'style.communication' : key,
-                                value: value,
-                                source: 'onboarding_interview'
-                            }),
-                        });
-                    }
+        for (const faq of faqs) {
+            if (faq.question && faq.answer) {
+                try {
+                    await fetch(`${backendUrl}/twins/${twinId}/verified-qna`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            question: faq.question,
+                            answer: faq.answer,
+                            owner_id: user?.id
+                        }),
+                    });
+                } catch (error) {
+                    console.error('Error saving FAQ:', error);
                 }
-            } catch (error) {
-                console.error('Error saving interview data:', error);
             }
         }
     };
 
-    const handleComplete = () => {
+    const savePersonality = async () => {
+        if (!twinId) return;
+
+        const expertiseText = [...selectedDomains, ...customExpertise].join(', ');
+
+        const systemInstructions = `You are ${twinName}${tagline ? `, ${tagline}` : ''}.
+Your areas of expertise include: ${expertiseText || 'general topics'}.
+Communication style: ${personality.tone}, ${personality.responseLength} responses.
+${personality.firstPerson ? 'Speak in first person ("I believe...")' : `Refer to yourself as ${twinName}`}
+${personality.customInstructions ? `Additional instructions: ${personality.customInstructions}` : ''}`;
+
+        try {
+            await supabase
+                .from('twins')
+                .update({
+                    system_instructions: systemInstructions,
+                    settings: {
+                        handle,
+                        tagline,
+                        expertise: [...selectedDomains, ...customExpertise],
+                        personality
+                    }
+                })
+                .eq('id', twinId);
+        } catch (error) {
+            console.error('Error saving personality:', error);
+        }
+    };
+
+    const handleLaunch = async () => {
+        if (!twinId) return;
+
+        // Mark twin as active
+        await supabase
+            .from('twins')
+            .update({ is_active: true })
+            .eq('id', twinId);
+
         // Save onboarding completed flag
         localStorage.setItem('onboardingCompleted', 'true');
+    };
 
-        // Navigate to dashboard
+    const handleComplete = () => {
         if (twinId) {
-            router.push(`/dashboard/twins/${twinId}?tab=overview`);
+            router.push(`/dashboard`);
         } else {
             router.push('/dashboard');
         }
@@ -186,14 +273,25 @@ export default function OnboardingPage() {
                 return <WelcomeStep />;
             case 1:
                 return (
-                    <CreateTwinStep
+                    <ClaimIdentityStep
                         twinName={twinName}
-                        twinPurpose={twinPurpose}
+                        handle={handle}
+                        tagline={tagline}
                         onTwinNameChange={setTwinName}
-                        onTwinPurposeChange={setTwinPurpose}
+                        onHandleChange={setHandle}
+                        onTaglineChange={setTagline}
                     />
                 );
             case 2:
+                return (
+                    <DefineExpertiseStep
+                        selectedDomains={selectedDomains}
+                        customExpertise={customExpertise}
+                        onDomainsChange={setSelectedDomains}
+                        onCustomExpertiseChange={setCustomExpertise}
+                    />
+                );
+            case 3:
                 return (
                     <AddContentStep
                         onFileUpload={handleFileUpload}
@@ -202,21 +300,37 @@ export default function OnboardingPage() {
                         pendingUrls={pendingUrls}
                     />
                 );
-            case 3:
-                return (
-                    <FirstChatStep
-                        twinName={twinName || 'Your Twin'}
-                        twinId={twinId || undefined}
-                        onDataCollected={handleInterviewComplete}
-                    />
-                );
             case 4:
                 return (
-                    <TrainingStep
+                    <SeedFAQsStep
+                        faqs={faqs}
+                        onFaqsChange={setFaqs}
+                        expertiseDomains={selectedDomains}
+                    />
+                );
+            case 5:
+                return (
+                    <SetPersonalityStep
+                        personality={personality}
+                        onPersonalityChange={setPersonality}
                         twinName={twinName || 'Your Twin'}
-                        contentCount={uploadedFiles.length + pendingUrls.length + Object.keys(interviewData).length}
-                        isTraining={true}
-                        trainingProgress={100}
+                    />
+                );
+            case 6:
+                return (
+                    <PreviewTwinStep
+                        twinId={twinId}
+                        twinName={twinName || 'Your Twin'}
+                        tagline={tagline}
+                    />
+                );
+            case 7:
+                return (
+                    <LaunchStep
+                        twinName={twinName || 'Your Twin'}
+                        handle={handle}
+                        twinId={twinId}
+                        onLaunch={handleLaunch}
                     />
                 );
             default:
@@ -230,7 +344,7 @@ export default function OnboardingPage() {
             currentStep={currentStep}
             onStepChange={handleStepChange}
             onComplete={handleComplete}
-            allowSkip={currentStep === 2} // Only allow skip on content step
+            allowSkip={currentStep === 3 || currentStep === 4} // Allow skip on content and FAQ steps
         >
             {renderStep()}
         </Wizard>

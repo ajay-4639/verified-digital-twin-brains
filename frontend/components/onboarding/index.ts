@@ -1,6 +1,11 @@
 export { Wizard, WizardStep, ProgressSteps } from './Wizard';
 export { WelcomeStep } from './steps/WelcomeStep';
-export { CreateTwinStep } from './steps/CreateTwinStep';
+export { ClaimIdentityStep } from './steps/ClaimIdentityStep';
+export { DefineExpertiseStep } from './steps/DefineExpertiseStep';
 export { AddContentStep } from './steps/AddContentStep';
+export { SeedFAQsStep } from './steps/SeedFAQsStep';
+export { SetPersonalityStep } from './steps/SetPersonalityStep';
+export { PreviewTwinStep } from './steps/PreviewTwinStep';
+export { LaunchStep } from './steps/LaunchStep';
 export { TrainingStep } from './steps/TrainingStep';
 export { FirstChatStep } from './steps/FirstChatStep';

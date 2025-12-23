@@ -8,3 +8,5 @@ export { Skeleton, SkeletonText, SkeletonAvatar, SkeletonCard, SkeletonTable, Sk
 export { EmptyState, EmptyKnowledge, EmptyConversations, EmptyEscalations, EmptyActions, EmptyTwins, EmptySearch, ErrorState } from './EmptyState';
 export { StatCard, StatCardCompact } from './StatCard';
 export { PremiumModal, ConfirmModal } from './PremiumModal';
+export { ErrorBoundary, withErrorBoundary } from './ErrorBoundary';
+export { PageTransition, PageLoadingOverlay, PageSkeleton } from './PageTransition';

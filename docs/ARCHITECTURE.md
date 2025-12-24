@@ -74,3 +74,57 @@ The system uses the following core tables:
   - `twin_id`: UUID for multi-tenancy.
   - `source_id`: UUID of the original document.
   - `text`: The raw text chunk.
+
+## Background Processing Foundation
+
+The system includes a jobs and logs infrastructure for tracking long-running operations like document ingestion, reindexing, and health checks.
+
+```mermaid
+graph LR
+    subgraph "Job Lifecycle"
+        Q[Queued] --> P[Processing]
+        P --> C[Complete]
+        P --> F[Failed]
+        P --> N[Needs Attention]
+    end
+    
+    subgraph "Storage"
+        Jobs[(jobs table)]
+        Logs[(job_logs table)]
+    end
+    
+    P --> Logs
+    F --> Logs
+```
+
+### Jobs Table
+- Tracks job status, type, priority, and metadata
+- Links to `twin_id` for ownership filtering
+- Status: `queued`, `processing`, `complete`, `failed`, `needs_attention`
+- Job types: `ingestion`, `reindex`, `health_check`, `other`
+
+### Job Logs Table
+- Immutable log entries per job
+- Levels: `info`, `warning`, `error`
+- Used for debugging and audit trail
+
+### API Endpoints
+- `GET /jobs` - List jobs (filtered by user's twins)
+- `GET /jobs/{id}` - Get job details
+- `GET /jobs/{id}/logs` - Get job logs
+- `POST /jobs` - Create new job
+
+### Frontend UI
+- Dashboard page at `/dashboard/jobs`
+- Read-only view of job status and logs
+- Useful for monitoring ingestion progress
+
+## Operational Documentation
+
+See `docs/ops/` for:
+- **AGENT_BRIEF.md** - How to operate in this repo
+- **QUALITY_GATE.md** - Definition of done, tests, rollback
+- **RUNBOOKS.md** - Troubleshooting guides
+- **LEARNINGS_LOG.md** - Compounding ledger of lessons
+- **ADR/** - Architecture decision records
+

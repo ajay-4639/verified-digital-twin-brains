@@ -1,18 +1,24 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import InterviewInterface from '../../../components/Chat/InterviewInterface';
 import BrainGraph from '../../../components/Brain/BrainGraph';
 import { useTwin } from '@/lib/context/TwinContext';
+import { getSupabaseClient } from '@/lib/supabase/client';
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
 
 export default function RightBrainPage() {
     const router = useRouter();
-    const { activeTwin, isLoading, twins } = useTwin();
+    const { activeTwin, isLoading, twins, refreshTwins, user } = useTwin();
+    const supabase = getSupabaseClient();
 
     const [refreshGraphTrigger, setRefreshGraphTrigger] = useState(0);
     const [nodeCount, setNodeCount] = useState(0);
     const [sessionTime, setSessionTime] = useState(0);
+    const [creatingTwin, setCreatingTwin] = useState(false);
+    const [createError, setCreateError] = useState<string | null>(null);
 
     // Session timer
     useEffect(() => {
@@ -21,13 +27,6 @@ export default function RightBrainPage() {
         }, 1000);
         return () => clearInterval(interval);
     }, []);
-
-    // Redirect to onboarding if no twins
-    useEffect(() => {
-        if (!isLoading && twins.length === 0) {
-            router.push('/onboarding');
-        }
-    }, [isLoading, twins, router]);
 
     const formatTime = (seconds: number) => {
         const mins = Math.floor(seconds / 60);
@@ -39,6 +38,49 @@ export default function RightBrainPage() {
         setRefreshGraphTrigger(prev => prev + 1);
         setNodeCount(prev => prev + 1);
     };
+
+    // Quick create a default twin
+    const createDefaultTwin = useCallback(async () => {
+        setCreatingTwin(true);
+        setCreateError(null);
+
+        try {
+            const { data: { session } } = await supabase.auth.getSession();
+            const token = session?.access_token;
+
+            if (!token) {
+                setCreateError('Not authenticated. Please log in again.');
+                return;
+            }
+
+            const response = await fetch(`${API_BASE_URL}/twins/create`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    name: user?.full_name ? `${user.full_name}'s Twin` : 'My Digital Twin',
+                    specialization_id: 'vc-brain', // Default to VC Brain
+                    settings: {}
+                })
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Failed to create twin');
+            }
+
+            // Refresh twins list to pick up the new twin
+            await refreshTwins();
+
+        } catch (error: any) {
+            console.error('Error creating twin:', error);
+            setCreateError(error.message || 'Failed to create twin');
+        } finally {
+            setCreatingTwin(false);
+        }
+    }, [supabase, user, refreshTwins]);
 
     // Loading state
     if (isLoading) {
@@ -52,24 +94,60 @@ export default function RightBrainPage() {
         );
     }
 
-    // No twin state
-    if (!activeTwin) {
+    // No twin state - Show inline creation instead of redirect
+    if (!activeTwin || twins.length === 0) {
         return (
-            <div className="flex items-center justify-center h-[calc(100vh-theme(spacing.20))]">
-                <div className="text-center max-w-md">
-                    <div className="w-16 h-16 bg-gradient-to-br from-indigo-500 to-purple-500 rounded-2xl flex items-center justify-center mx-auto mb-4">
-                        <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+            <div className="flex items-center justify-center h-[calc(100vh-theme(spacing.20))] bg-gradient-to-br from-slate-50 via-white to-indigo-50/30">
+                <div className="text-center max-w-lg p-8">
+                    <div className="w-20 h-20 bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 rounded-3xl flex items-center justify-center mx-auto mb-6 shadow-2xl shadow-indigo-500/40">
+                        <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
                         </svg>
                     </div>
-                    <h2 className="text-2xl font-bold text-slate-900 mb-2">Create Your Twin First</h2>
-                    <p className="text-slate-500 mb-6">You need to create a digital twin before starting the cognitive interview.</p>
-                    <button
-                        onClick={() => router.push('/onboarding')}
-                        className="px-6 py-3 bg-gradient-to-r from-indigo-500 to-purple-500 text-white rounded-xl font-semibold hover:shadow-lg transition-all"
-                    >
-                        Create Your Twin
-                    </button>
+                    <h2 className="text-3xl font-black text-slate-900 mb-3">Start Your Interview</h2>
+                    <p className="text-slate-500 mb-8 text-lg">
+                        Let's create your digital twin and begin the cognitive interview.
+                        I'll learn about you through conversation.
+                    </p>
+
+                    {createError && (
+                        <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">
+                            {createError}
+                        </div>
+                    )}
+
+                    <div className="space-y-4">
+                        <button
+                            onClick={createDefaultTwin}
+                            disabled={creatingTwin}
+                            className="w-full px-8 py-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-2xl font-bold text-lg hover:shadow-2xl hover:shadow-indigo-500/40 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-3"
+                        >
+                            {creatingTwin ? (
+                                <>
+                                    <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                    Creating Your Twin...
+                                </>
+                            ) : (
+                                <>
+                                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                    </svg>
+                                    Start Interview Now
+                                </>
+                            )}
+                        </button>
+
+                        <button
+                            onClick={() => router.push('/onboarding')}
+                            className="w-full px-8 py-3 bg-white border-2 border-slate-200 text-slate-600 rounded-2xl font-semibold hover:border-indigo-300 hover:text-indigo-600 transition-all"
+                        >
+                            Go Through Full Onboarding Instead
+                        </button>
+                    </div>
+
+                    <p className="text-xs text-slate-400 mt-6">
+                        You can customize your twin's specialization later in Settings
+                    </p>
                 </div>
             </div>
         );
@@ -178,4 +256,5 @@ export default function RightBrainPage() {
         </div>
     );
 }
+
 

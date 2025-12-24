@@ -142,7 +142,8 @@ async def get_my_twins(user=Depends(get_current_user)):
     """Get all twins owned by the current user."""
     user_id = user.get("user_id")
     
-    result = supabase.table("twins").select("*").eq("owner_id", user_id).execute()
+    # Note: twins table uses tenant_id, not owner_id
+    result = supabase.table("twins").select("*").eq("tenant_id", user_id).execute()
     
     return {
         "twins": result.data if result.data else [],

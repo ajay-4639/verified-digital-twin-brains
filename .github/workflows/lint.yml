@@ -39,8 +39,13 @@ jobs:
       - name: Install dependencies
         run: |
           cd frontend
-          npm install
+          npm ci
       - name: Run Lint
         run: |
           cd frontend
           npm run lint
+      - name: Build (Preflight Check)
+        run: |
+          cd frontend
+          npm run build
+

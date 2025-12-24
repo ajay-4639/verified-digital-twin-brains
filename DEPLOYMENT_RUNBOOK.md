@@ -1,267 +1,290 @@
-# Deployment Runbook
+# Deployment Runbook (Security Hardened)
 
-**Target Stack:** Vercel (Frontend) | Render/Railway (Backend) | Supabase | Pinecone
-
----
-
-## Pre-Deployment Checklist
-
-- [ ] Supabase project created with Google OAuth enabled
-- [ ] Pinecone index created (dimension: 1536, metric: cosine)
-- [ ] OpenAI API key obtained
-- [ ] Domain configured for frontend (e.g., `yourapp.com`)
-- [ ] Backend deployment URL known (or will be after deploy)
+**Version:** 2.0 (Corrected)  
+**Date:** 2025-12-23  
+**Status:** Ready for 10 External Users
 
 ---
 
-## Step 1: Supabase Configuration
+## 1. Overall Direction Confirmation
 
-### 1.1 Enable Google OAuth
+### ✅ Directionally Correct For:
 
-1. Go to **Supabase Dashboard → Authentication → Providers**
-2. Enable **Google**
-3. Add Google OAuth credentials:
-   - Client ID
-   - Client Secret
-4. In **Google Cloud Console**, add authorized redirect:
-   ```
-   https://YOUR_SUPABASE_PROJECT.supabase.co/auth/v1/callback
-   ```
-
-### 1.2 Configure Redirect URLs
-
-1. Go to **Supabase Dashboard → Authentication → URL Configuration**
-2. Set:
-   ```
-   Site URL: https://yourapp.com
-   
-   Redirect URLs:
-   - https://yourapp.com/auth/callback
-   - http://localhost:3000/auth/callback
-   ```
-
-### 1.3 Copy API Keys
-
-From **Supabase Dashboard → Settings → API**, copy:
-
-| Key | Use For |
-|-----|---------|
-| Project URL | Both frontend and backend |
-| anon/public key | Frontend + Backend |
-| service_role key | Backend only |
-| JWT Secret | Backend JWT_SECRET env var |
+| Requirement | Status | Notes |
+|------------|--------|-------|
+| P0 Beta Deployment | ✅ Yes | All foundational components implemented |
+| 10 Real Users | ✅ Yes | Auth, isolation, rate limiting in place |
+| Delphi-style Credibility | ✅ Yes | KB-first grounding, confidence fallbacks |
 
 ---
 
-## Step 2: Backend Deployment (Render/Railway)
+## 2. Security Fixes Applied
 
-### 2.1 Create New Web Service
+### 2.1 Production Auth Bypass: REMOVED ✅
 
-**Render:**
-1. New → Web Service
-2. Connect to GitHub repo
-3. Root Directory: `backend`
-4. Build Command: `pip install -r requirements.txt`
-5. Start Command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+**Previous State:** `DEV_MODE=true` allowed fake development tokens to bypass auth.
 
-**Railway:**
-1. New Project → Deploy from GitHub
-2. Root Directory: `backend`
-3. Start Command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+**Current State:** 
+- DEV_MODE bypass logic **completely removed** from `auth_guard.py`
+- All requests now require valid Supabase JWT or API key
+- No emergency shortcuts exist (rollback-based recovery only)
 
-### 2.2 Set Environment Variables
+**File:** `backend/modules/auth_guard.py`
+
+### 2.2 JWT Verification: STRENGTHENED ✅
+
+| Check | Status | Implementation |
+|-------|--------|----------------|
+| Signature verified | ✅ | `jwt.decode()` with `SUPABASE_JWT_SECRET` |
+| Expiry enforced | ✅ | `options={"verify_exp": True}` |
+| Supabase JWT secret used | ✅ | From `JWT_SECRET` env var |
+| Tenant from DB (not JWT) | ✅ | Lookup via `users.tenants(id)` |
+| Weak secret warning | ✅ | Startup stderr warning |
+
+### 2.3 Tenant Isolation: ENFORCED ✅
+
+| Control | Status | Location |
+|---------|--------|----------|
+| `tenant_id` on domain tables | ✅ | twins, via owner_id lookup |
+| RLS enabled | ✅ | All 30+ tables via migration |
+| `verify_twin_access()` | ✅ | Checks `twins.owner_id == user_id` |
+| Backend uses service_role | ✅ | Bypasses RLS for trusted operations |
+
+---
+
+## 3. Security & Isolation Checklist
+
+### Pre-Deploy Verification
 
 ```bash
-# Required
+# 1. Verify RLS is enabled (run in Supabase SQL Editor)
+SELECT tablename, rowsecurity 
+FROM pg_tables 
+WHERE schemaname = 'public';
+-- All tables should show rowsecurity = true
+
+# 2. Verify no open policies (run in Supabase SQL Editor)
+SELECT schemaname, tablename, policyname, permissive, cmd
+FROM pg_policies
+WHERE schemaname = 'public';
+-- Should show service_role_bypass policies only
+```
+
+### Mandatory Smoke Test: Cross-Tenant Isolation
+
+After deploy, test with 2 real users:
+
+```
+1. User A creates a twin → Record twin_id_a
+2. User B logs in
+3. User B calls: GET /twins/{twin_id_a}/graph
+4. EXPECTED: 403 Forbidden ("You do not have access to this twin")
+5. User B calls: POST /chat/{twin_id_a}
+6. EXPECTED: 403 Forbidden
+```
+
+**If User B can access User A's twin: STOP DEPLOYMENT IMMEDIATELY**
+
+---
+
+## 4. Rate Limiting & Abuse Protection
+
+### Implemented Controls
+
+| Control | Status | Configuration |
+|---------|--------|---------------|
+| Per-session rate limit | ✅ | 30 requests/hour for widgets |
+| Request size limit | ⚠️ | FastAPI default (1MB) |
+| Token limit per response | ⚠️ | OpenAI model default |
+| Logging with context | ✅ | stdout with user context |
+
+### Recommended Cost Guardrails
+
+Add to backend `.env`:
+
+```bash
+# OpenAI spending controls (implement in agent.py if needed)
+MAX_TOKENS_PER_REQUEST=2000
+DAILY_OPENAI_SPEND_CEILING_USD=50
+```
+
+---
+
+## 5. Operational Safety
+
+### 5.1 Rollback Strategy (Primary Failure Response)
+
+**If auth breaks:**
+
+1. **DO NOT** enable DEV_MODE (bypass no longer exists)
+2. Check JWT_SECRET matches Supabase
+3. Verify Supabase redirect URLs
+4. Roll back to previous commit if needed: `git revert HEAD`
+5. Redeploy previous working version
+
+### 5.2 Failure Handling
+
+| Failure | Response |
+|---------|----------|
+| Supabase unavailable | 500 error, user sees "Service temporarily unavailable" |
+| Pinecone unavailable | Chat degrades gracefully, returns "I don't have context" |
+| OpenAI unavailable | 500 error, logged, user sees error message |
+| Invalid JWT | 401 with "Token has expired" or "Invalid token" |
+| Wrong tenant access | 403 with "You do not have access to this twin" |
+
+---
+
+## 6. Deployment Steps
+
+### Step 1: Backend (Render/Railway)
+
+```bash
+# Required Environment Variables
 SUPABASE_URL=https://xyz.supabase.co
-SUPABASE_KEY=eyJhbGci...
-SUPABASE_SERVICE_KEY=eyJhbGci...
-JWT_SECRET=<from Supabase Settings → API → JWT Secret>
+SUPABASE_KEY=eyJhbGci...           # anon key
+SUPABASE_SERVICE_KEY=eyJhbGci...   # service role key
+JWT_SECRET=<EXACT copy from Supabase Dashboard → Settings → API → JWT Secret>
 OPENAI_API_KEY=sk-...
 PINECONE_API_KEY=...
 PINECONE_INDEX_NAME=digital-twin
 
-# Production settings
+# Production settings (CRITICAL)
 DEV_MODE=false
 ALLOWED_ORIGINS=https://yourapp.com,https://www.yourapp.com
 HOST=0.0.0.0
 PORT=8000
 ```
 
-### 2.3 Verify Health Check
+**Build Command:** `pip install -r requirements.txt`  
+**Start Command:** `uvicorn main:app --host 0.0.0.0 --port $PORT`
 
-After deploy completes:
-
-```bash
-curl https://your-backend.onrender.com/health
-```
-
-**Expected response:**
-```json
-{"status": "healthy", "service": "verified-digital-twin-brain-api", "version": "1.0.0"}
-```
-
----
-
-## Step 3: Frontend Deployment (Vercel)
-
-### 3.1 Import Project
-
-1. Vercel → New Project → Import Git Repository
-2. Root Directory: `frontend`
-3. Framework Preset: Next.js
-
-### 3.2 Set Environment Variables
+### Step 2: Frontend (Vercel)
 
 ```bash
-# Required
 NEXT_PUBLIC_SUPABASE_URL=https://xyz.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGci...
 NEXT_PUBLIC_BACKEND_URL=https://your-backend.onrender.com
-
-# Optional
-NEXT_PUBLIC_FRONTEND_URL=https://yourapp.com
 ```
 
-**⚠️ DO NOT SET:**
-- `NEXT_PUBLIC_DEV_TOKEN` (must not exist in production)
+**DO NOT SET:** `NEXT_PUBLIC_DEV_TOKEN` (removed from codebase)
 
-### 3.3 Deploy
+### Step 3: Supabase Configuration
 
-Click **Deploy** and wait for build to complete.
+**Authentication → URL Configuration:**
+```
+Site URL: https://yourapp.com
+Redirect URLs:
+- https://yourapp.com/auth/callback
+```
+
+**Authentication → Providers → Google:**
+- Enable
+- Add Client ID and Secret
+- Google Console redirect: `https://xyz.supabase.co/auth/v1/callback`
 
 ---
 
-## Step 4: Post-Deploy Smoke Tests
+## 7. Post-Deploy Smoke Tests
 
 ### Test 1: Health Check
-
 ```bash
 curl https://your-backend.onrender.com/health
+# Expected: {"status": "healthy"}
 ```
 
-✅ Expected: `{"status": "healthy"}`
+### Test 2: Auth Flow
+1. Open `https://yourapp.com`
+2. Click "Login with Google"
+3. Complete OAuth
+4. Check: Redirected to `/dashboard`
+5. Check: User in `public.users` table
+6. Check: Tenant in `public.tenants` table
 
-### Test 2: Frontend Loads
-
-1. Navigate to `https://yourapp.com`
-2. ✅ Landing page renders without errors
-
-### Test 3: Login Flow
-
-1. Click "Login with Google"
-2. Complete Google OAuth
-3. ✅ Redirected to `/dashboard`
-4. Check Supabase: User appears in `auth.users`
-5. Check Supabase: Row appears in `public.users`
-6. Check Supabase: Row appears in `public.tenants`
-
-### Test 4: Twin Loading
-
+### Test 3: Twin Access
 1. Complete onboarding (create twin)
-2. Navigate to **Right Brain**
-3. ✅ Twin loads dynamically (not hardcoded)
-4. ✅ Graph visualization appears
+2. Navigate to Right Brain
+3. Check: Twin loads (not 403)
+4. Check: Graph visualization appears
 
-### Test 5: Chat Interaction
+### Test 4: Chat E2E
+1. Send message in chat
+2. Check: Response returns
+3. Check: `conversations` and `messages` have rows
 
-1. Type a question in chat
-2. ✅ Response streams back
-3. Check Supabase: `conversations` and `messages` have new rows
-
----
-
-## Step 5: Rollback Plan
-
-### If Auth Breaks
-
-1. **Immediately:** Check Supabase → Authentication → Logs
-2. **Check:** Is `JWT_SECRET` correct in backend?
-3. **Check:** Are redirect URLs configured correctly?
-4. **Temporary fix:** Set `DEV_MODE=true` on backend (INSECURE, dev only)
-
-### If Backend Crashes
-
-1. Check Render/Railway logs
-2. Common issues:
-   - Missing env var → Add it
-   - Pinecone connection failed → Verify API key and index name
-   - Supabase connection failed → Verify URL and key
-
-### If Frontend 500s
-
-1. Check Vercel function logs
-2. Common issues:
-   - Missing `NEXT_PUBLIC_SUPABASE_URL`
-   - Missing `NEXT_PUBLIC_BACKEND_URL`
-   - Backend not responding (check backend health first)
-
-### Emergency: Disable Auth
-
-If auth is completely broken and you need the app accessible:
-
-1. On backend, set `DEV_MODE=true` (TEMPORARY, INSECURE)
-2. This enables `development_token` bypass
-3. Fix the root cause ASAP
-4. Set `DEV_MODE=false` again
+### Test 5: Cross-Tenant Isolation ⚠️ CRITICAL
+1. Log in as User A, create twin, record twin_id
+2. Log out, log in as User B
+3. Try to access User A's twin via API
+4. Expected: 403 Forbidden
 
 ---
 
-## Troubleshooting Quick Reference
+## 8. One-Week Scope (Realistic)
 
-| Symptom | Check | Fix |
-|---------|-------|-----|
-| 401 on API calls | JWT_SECRET mismatch | Copy exact value from Supabase |
-| 403 on twin access | verify_twin_access failing | User doesn't own the twin |
-| CORS error | ALLOWED_ORIGINS missing frontend | Add frontend URL to ALLOWED_ORIGINS |
-| OAuth redirect fails | Redirect URL not in Supabase | Add to Authentication → URL Config |
-| "Invalid API key" | PINECONE_API_KEY wrong | Verify in Pinecone console |
-| Chat doesn't respond | OpenAI key invalid | Verify OPENAI_API_KEY |
+### ✅ In Scope for Beta
 
----
+| Feature | Status |
+|---------|--------|
+| Google OAuth login | ✅ |
+| User + Tenant sync | ✅ |
+| Twin creation/loading | ✅ |
+| KB-grounded chat | ✅ |
+| Confidence scores | ✅ |
+| Session memory only | ✅ |
 
-## DNS & SSL
+### ❌ Explicitly Deferred
 
-### Vercel (Frontend)
-- Automatic SSL
-- Add custom domain in Vercel project settings
-
-### Render/Railway (Backend)
-- Automatic SSL on `*.onrender.com` / `*.railway.app`
-- For custom domain, configure in platform settings
-
----
-
-## Monitoring
-
-### Minimal Monitoring (P0)
-
-1. **Backend:** Use Render/Railway built-in logs
-2. **Frontend:** Use Vercel function logs
-3. **Auth:** Supabase → Authentication → Logs
-4. **Database:** Supabase → SQL Editor → Check table counts
-
-### Health Check Endpoint
-
-Set up uptime monitoring (e.g., UptimeRobot, Better Uptime):
-
-```
-URL: https://your-backend.onrender.com/health
-Interval: 5 minutes
-Alert: Status != 200
-```
+| Feature | Reason |
+|---------|--------|
+| Full persistent memory | Complexity, not P0 |
+| Multi-channel (Slack/SMS) | Integration work |
+| Analytics dashboards | Polish, not P0 |
+| Payment/billing | Not needed for beta |
+| Advanced onboarding | Polish, not P0 |
 
 ---
 
-## Definition of Done
+## 9. Remaining Risks
 
-| Check | Status |
-|-------|--------|
-| Backend responds to /health | ⬜ |
-| Frontend loads without errors | ⬜ |
-| Google OAuth login works | ⬜ |
-| User + Tenant created on login | ⬜ |
-| Twin loads dynamically | ⬜ |
-| Chat sends and receives messages | ⬜ |
+| Risk | Severity | Mitigation |
+|------|----------|------------|
+| JWT_SECRET misconfiguration | HIGH | Startup warning + clear 500 error |
+| First user has no twin | LOW | Redirect to onboarding |
+| OpenAI rate limits | MEDIUM | Graceful degradation |
+| Pinecone cold start | LOW | Retry logic in agent |
 
-**Deployment is complete when all boxes are checked.**
+---
+
+## 10. Final Decision
+
+### Safe to Onboard 10 Users: **YES** ✅
+
+**Justification:**
+
+1. **Auth bypass removed** - No DEV_MODE shortcuts exist
+2. **JWT verification complete** - Signature, expiry, Supabase secret
+3. **Tenant isolation enforced** - RLS + verify_twin_access
+4. **Rate limiting exists** - Per-session limits for widgets
+5. **Clear error handling** - 401/403/500 with descriptive messages
+6. **Rollback strategy defined** - Git revert, no emergency bypasses
+
+**Conditions:**
+
+- [ ] `JWT_SECRET` set to exact Supabase value
+- [ ] `DEV_MODE=false` in production
+- [ ] Cross-tenant isolation smoke test passes
+- [ ] Health check returns 200
+
+---
+
+## Appendix: File Changes Summary
+
+| File | Change |
+|------|--------|
+| `backend/modules/auth_guard.py` | Removed DEV_MODE bypass, strengthened JWT |
+| `backend/main.py` | /health endpoint, startup validation |
+| `frontend/components/Chat/InterviewInterface.tsx` | Supabase auth |
+| `frontend/components/Brain/BrainGraph.tsx` | Supabase auth |
+| `frontend/components/Chat/ChatInterface.tsx` | Supabase auth |
+| `DEPLOYMENT_READINESS.md` | Created |
+| `DEPLOYMENT_RUNBOOK.md` | This file (corrected) |

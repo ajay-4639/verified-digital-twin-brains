@@ -7,25 +7,23 @@ from modules.sessions import create_session
 
 load_dotenv()
 
-SECRET_KEY = os.getenv("JWT_SECRET", "secret")
+# JWT Configuration for Supabase
+# JWT_SECRET must match Supabase's JWT secret from Dashboard → Settings → API
+SUPABASE_JWT_SECRET = os.getenv("JWT_SECRET", "")
 ALGORITHM = "HS256"
-DEV_MODE = os.getenv("DEV_MODE", "true").lower() == "true"  # Default to true for local development
 
-# Multi-tenant dev tokens for testing tenant isolation
-DEV_TOKENS = {
-    "development_token": {
-        "user_id": "b415a7a9-c8f8-43b3-8738-a0062a90c016",
-        "tenant_id": "986f270e-2d5c-4f88-ad88-7d2a15ea8ab1",
-        "role": "owner",
-        "allowed_twins": ["eeeed554-9180-4229-a9af-0f8dd2c69e9b"]
-    },
-    "tenant_b_dev_token": {
-        "user_id": "user-b-id-0000-0000-0000",
-        "tenant_id": "tenant-b-id-0000-0000-0000",
-        "role": "owner",
-        "allowed_twins": []  # Tenant B has no twins - for testing isolation
-    }
-}
+# DEV_MODE controls domain validation strictness, NOT auth bypass
+# In production, this should be false
+DEV_MODE = os.getenv("DEV_MODE", "true").lower() == "true"
+
+# Startup validation - warn if JWT secret looks weak
+if not SUPABASE_JWT_SECRET or len(SUPABASE_JWT_SECRET) < 32:
+    import sys
+    print("=" * 60, file=sys.stderr)
+    print("SECURITY WARNING: JWT_SECRET is not properly configured!", file=sys.stderr)
+    print("  Production auth WILL FAIL without the correct JWT secret.", file=sys.stderr)
+    print("  Copy from: Supabase Dashboard → Settings → API → JWT Secret", file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
 
 def get_current_user(
     request: Request,
@@ -34,29 +32,37 @@ def get_current_user(
     origin: str = Header(None),
     referer: str = Header(None)
 ):
+    """
+    Authenticate the current user via:
+    1. API Key (for public widgets)
+    2. Supabase JWT (for authenticated users)
+    
+    NO AUTH BYPASS EXISTS - all requests must be properly authenticated.
+    """
+    # Import here to avoid circular imports
+    from modules.observability import supabase as supabase_client
+    
     # 1. API Key check (for public widgets)
     if x_twin_api_key:
-        # Validate API key
         key_info = validate_api_key(x_twin_api_key)
         if not key_info:
             raise HTTPException(status_code=401, detail="Invalid API key")
         
-        # Domain validation
+        # Domain validation (enforced in production)
         domain_source = origin or referer or ""
         allowed_domains = key_info.get("allowed_domains", [])
         
-        # Skip domain validation in dev mode for backward compatibility
         if not DEV_MODE and not validate_domain(domain_source, allowed_domains):
             raise HTTPException(status_code=403, detail="Domain not allowed for this API key")
         
-        # Extract IP address and user agent for session
+        # Extract IP and user agent for session
         ip_address = None
         user_agent = None
         try:
             ip_address = request.client.host if request.client else None
             user_agent = request.headers.get("user-agent")
         except:
-            pass  # Request might not have client info
+            pass
         
         # Create anonymous session
         try:
@@ -72,8 +78,8 @@ def get_current_user(
             session_id = None
         
         return {
-            "user_id": None,  # Anonymous user
-            "tenant_id": None,  # No tenant for anonymous
+            "user_id": None,
+            "tenant_id": None,
             "role": "visitor",
             "twin_id": key_info["twin_id"],
             "group_id": key_info.get("group_id"),
@@ -81,31 +87,67 @@ def get_current_user(
             "api_key_id": key_info["id"]
         }
 
-    # 2. Development bypass with multi-tenant support
-    if DEV_MODE and authorization:
-        token = authorization.replace("Bearer ", "")
-        if token in DEV_TOKENS:
-            token_info = DEV_TOKENS[token]
-            return {
-                "user_id": token_info["user_id"],
-                "tenant_id": token_info["tenant_id"],
-                "role": token_info["role"],
-                "allowed_twins": token_info.get("allowed_twins", [])
-            }
-
+    # 2. JWT Authentication (Supabase tokens)
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing authorization header")
     
+    if not SUPABASE_JWT_SECRET or len(SUPABASE_JWT_SECRET) < 32:
+        raise HTTPException(
+            status_code=500, 
+            detail="Server authentication not configured. Contact administrator."
+        )
+    
     try:
-        token = authorization.split(" ")[1]
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        # Extract bearer token
+        parts = authorization.split(" ")
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            raise HTTPException(status_code=401, detail="Invalid authorization format")
+        
+        token = parts[1]
+        
+        # Verify and decode JWT signature (this validates expiry too)
+        payload = jwt.decode(
+            token, 
+            SUPABASE_JWT_SECRET, 
+            algorithms=[ALGORITHM],
+            options={"verify_exp": True}  # Explicitly verify expiry
+        )
+        
+        # Supabase JWT has 'sub' as user_id
         user_id = payload.get("sub")
-        tenant_id = payload.get("tenant_id")
-        if user_id is None or tenant_id is None:
-            raise HTTPException(status_code=401, detail="Invalid token payload")
-        return {"user_id": user_id, "tenant_id": tenant_id, "role": payload.get("role")}
-    except (JWTError, IndexError):
-        raise HTTPException(status_code=401, detail="Could not validate credentials")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token: missing user ID")
+        
+        # Extract email and metadata from JWT (Supabase includes these)
+        email = payload.get("email", "")
+        user_metadata = payload.get("user_metadata", {})
+        
+        # Lookup tenant_id from database (not in JWT)
+        tenant_id = None
+        try:
+            user_lookup = supabase_client.table("users").select("tenants(id)").eq("id", user_id).execute()
+            if user_lookup.data and len(user_lookup.data) > 0:
+                tenants_data = user_lookup.data[0].get("tenants")
+                if isinstance(tenants_data, dict):
+                    tenant_id = tenants_data.get("id")
+        except Exception as e:
+            # User might not exist yet (first login) - sync-user will create them
+            print(f"Tenant lookup failed (expected for new users): {e}")
+        
+        return {
+            "user_id": user_id,
+            "tenant_id": tenant_id,
+            "role": "owner",  # All authenticated users are owners of their content
+            "email": email,
+            "user_metadata": user_metadata,
+            "name": user_metadata.get("full_name") or user_metadata.get("name"),
+            "avatar_url": user_metadata.get("avatar_url")
+        }
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except JWTError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
 
 def verify_owner(user=Depends(get_current_user)):
     if user.get("role") != "owner":

@@ -169,8 +169,18 @@ async def list_training_jobs_endpoint(twin_id: Optional[str] = None, status: Opt
 async def process_queue_endpoint(twin_id: Optional[str] = None, user=Depends(verify_owner)):
     """Process all queued jobs (on-demand, runs in API process)"""
     from modules.job_queue import dequeue_job, get_queue_length
-    from modules.training_jobs import process_training_job
+    from modules.training_jobs import process_training_job, list_training_jobs
     import traceback
+    
+    # Validate twin_id is provided
+    if not twin_id:
+        raise HTTPException(
+            status_code=400, 
+            detail="twin_id query parameter is required"
+        )
+    
+    # Verify user owns this twin
+    verify_twin_ownership(twin_id, user)
     
     processed = 0
     failed = 0
@@ -251,6 +261,9 @@ async def process_queue_endpoint(twin_id: Optional[str] = None, user=Depends(ver
     # Include error details if any
     if errors:
         response["errors"] = errors[:5]  # Limit to first 5 errors to avoid huge response
+        # If all failed, include first error in message
+        if processed == 0 and failed > 0:
+            response["message"] = f"Failed to process {failed} job(s). First error: {errors[0]}"
     
     return response
 

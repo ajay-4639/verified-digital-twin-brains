@@ -133,10 +133,25 @@ export default function StagingPage() {
         }, 1000);
       } else {
         const data = await response.json();
-        setError(data.detail || 'Failed to process queue');
+        const errorMsg = data.detail || data.message || 'Failed to process queue';
+        // Include error details if available
+        if (data.errors && data.errors.length > 0) {
+          setError(`${errorMsg}: ${data.errors.join('; ')}`);
+        } else {
+          setError(errorMsg);
+        }
+        // Still show partial success if some jobs processed
+        if (data.processed > 0) {
+          setQueueStatus({
+            processed: data.processed || 0,
+            failed: data.failed || 0,
+            remaining: data.remaining || 0
+          });
+        }
       }
-    } catch (err) {
-      setError('Connection error while processing queue');
+    } catch (err: any) {
+      console.error('Process queue error:', err);
+      setError(err.message || 'Connection error while processing queue');
     } finally {
       setProcessingQueue(false);
     }

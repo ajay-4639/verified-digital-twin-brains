@@ -37,6 +37,11 @@ def extract_video_id(url: str) -> str:
     return None
 
 async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
+    """
+    Ingest YouTube video transcript using multi-strategy approach:
+    1. YouTubeTranscriptApi (fastest, for videos with captions)
+    2. yt-dlp + Gemini/Whisper (for videos without captions)
+    """
     video_id = extract_video_id(url)
     if not video_id:
         raise ValueError("Invalid YouTube URL")
@@ -44,24 +49,35 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
     text = None
     transcript_error = None
     
-    # Method 1: Try YouTubeTranscriptApi (official transcripts)
+    # ============================================================
+    # Strategy 1: YouTubeTranscriptApi (official transcripts - FREE)
+    # ============================================================
+    cookies_file = os.path.join(os.path.dirname(__file__), '..', 'youtube_cookies.txt')
+    
     try:
-        transcript_snippets = YouTubeTranscriptApi().fetch(video_id)
+        # Pass cookies if available to bypass IP blocks
+        if os.path.exists(cookies_file):
+            print(f"[YouTube] Using cookies for transcript API: {cookies_file}")
+            transcript_snippets = YouTubeTranscriptApi().fetch(video_id, cookies=cookies_file)
+        else:
+            transcript_snippets = YouTubeTranscriptApi().fetch(video_id)
+            
         text = " ".join([item.text for item in transcript_snippets])
         log_ingestion_event(source_id, twin_id, "info", f"Fetched official YouTube transcript")
     except Exception as e:
         transcript_error = str(e)
-        print(f"Transcript API failed: {e}")
+        print(f"[YouTube] Transcript API failed: {e}")
         log_ingestion_event(source_id, twin_id, "warning", f"Transcript API failed: {e}")
     
-    # Method 2: Try with different languages if available
+    # ============================================================
+    # Strategy 2: Try alternative transcript languages
+    # ============================================================
     if not text:
         try:
-            # Try to get available transcript languages
             from youtube_transcript_api import YouTubeTranscriptApi as YTA
-            transcript_list = YTA.list_transcripts(video_id)
+            transcript_list = YTA.list_transcripts(video_id, cookies=cookies_file if os.path.exists(cookies_file) else None)
             
-            # Try generated transcripts first
+            # Try all available transcripts
             for transcript in transcript_list:
                 try:
                     fetched = transcript.fetch()
@@ -71,17 +87,23 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
                 except:
                     continue
         except Exception as e:
-            print(f"Alternative transcript fetch failed: {e}")
+            print(f"[YouTube] Alternative transcript fetch failed: {e}")
     
-    # Method 3: yt-dlp fallback (may fail due to YouTube bot detection)
+    # ============================================================
+    # Strategy 3: yt-dlp + Gemini/Whisper transcription
+    # ============================================================
     if not text:
-        print("Attempting yt-dlp fallback (may be blocked by YouTube)...")
-        log_ingestion_event(source_id, twin_id, "warning", "Attempting yt-dlp fallback")
+        print("[YouTube] No captions found, attempting audio download + transcription...")
+        log_ingestion_event(source_id, twin_id, "warning", "Attempting audio download + transcription")
+        
         try:
+            from modules.transcription import transcribe_audio_multi
+            
             temp_dir = "temp_uploads"
             os.makedirs(temp_dir, exist_ok=True)
             temp_filename = f"yt_{video_id}"
             
+            # yt-dlp options with better compatibility
             ydl_opts = {
                 'format': 'm4a/bestaudio/best',
                 'outtmpl': os.path.join(temp_dir, f"{temp_filename}.%(ext)s"),
@@ -92,35 +114,47 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
                 }],
                 'quiet': True,
                 'no_warnings': True,
+                # Cookie options for authenticated access
+                'cookiesfrombrowser': ('chrome',) if os.name == 'nt' else None,
             }
+            
+            # Check for cookies file (more reliable than browser extraction)
+            if os.path.exists(cookies_file):
+                ydl_opts['cookiefile'] = cookies_file
+                print(f"[YouTube] Using cookies file for yt-dlp: {cookies_file}")
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
             
             audio_path = os.path.join(temp_dir, f"{temp_filename}.mp3")
-            text = await transcribe_audio(audio_path)
             
+            # Use multi-provider transcription (Gemini first, then Whisper)
+            text = transcribe_audio_multi(audio_path)
+            log_ingestion_event(source_id, twin_id, "info", "Audio transcribed via Gemini/Whisper")
+            
+            # Cleanup
             if os.path.exists(audio_path):
                 os.remove(audio_path)
-        except Exception as yt_dlp_error:
-            error_str = str(yt_dlp_error)
-            print(f"yt-dlp fallback failed: {error_str}")
+                
+        except Exception as download_error:
+            error_str = str(download_error)
+            print(f"[YouTube] Download + transcription failed: {error_str}")
             
             # Provide user-friendly error message
-            if "Sign in to confirm" in error_str or "bot" in error_str.lower():
+            if "Sign in to confirm" in error_str or "bot" in error_str.lower() or "blocking" in error_str.lower():
+                hint = "Ensure 'backend/youtube_cookies.txt' exists and contains valid Netscape cookies."
                 raise ValueError(
-                    f"YouTube is blocking automated access. "
-                    f"This video may not have captions available. "
-                    f"Try a different video with closed captions, or contact support. "
+                    "YouTube is blocking the connection (IP blocked or bot detection). "
+                    f"{hint} "
                     f"Original error: {transcript_error or error_str}"
                 )
             else:
-                raise ValueError(f"Could not ingest YouTube video: {yt_dlp_error}")
+                raise ValueError(f"Could not ingest YouTube video: {download_error}")
 
     if not text:
         raise ValueError(
             "No transcript could be extracted. This video may not have captions. "
-            "YouTube blocks automated downloads for videos without captions."
+            "Try a different video with closed captions (CC) enabled."
         )
         
     try:
@@ -487,11 +521,22 @@ async def approve_source(source_id: str) -> str:
         Training job ID
     """
     # Get source to verify it exists and get twin_id
-    source_response = supabase.table("sources").select("twin_id, staging_status").eq("id", source_id).single().execute()
+    source_response = supabase.table("sources").select("twin_id, staging_status, content_text, filename").eq("id", source_id).single().execute()
     if not source_response.data:
         raise ValueError(f"Source {source_id} not found")
     
-    twin_id = source_response.data["twin_id"]
+    source_data = source_response.data
+    twin_id = source_data["twin_id"]
+    content_text = source_data.get("content_text")
+    
+    # Validate source has content_text before approving
+    if not content_text or len(content_text.strip()) == 0:
+        filename = source_data.get("filename", "Unknown")
+        raise ValueError(
+            f"Source '{filename}' has no extracted text content. "
+            f"This usually means text extraction failed during ingestion. "
+            f"Please delete and re-upload this source."
+        )
     
     # Update staging status
     supabase.table("sources").update({

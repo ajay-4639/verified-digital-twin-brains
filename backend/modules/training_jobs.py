@@ -144,10 +144,12 @@ async def process_training_job(job_id: str) -> bool:
         
         source_data = source_response.data
         extracted_text = source_data.get("content_text")
+        filename = source_data.get("filename", "Unknown")
         
-        # Fallback: If no content_text, try to reconstruct from Pinecone
-        if not extracted_text:
-            print(f"Source {source_id} has no content_text, attempting to reconstruct from Pinecone...")
+        # Validate content_text exists
+        if not extracted_text or len(extracted_text.strip()) == 0:
+            # Fallback: If no content_text, try to reconstruct from Pinecone
+            print(f"[Process Job] Source {source_id} ({filename}) has no content_text, attempting to reconstruct from Pinecone...")
             from modules.clients import get_pinecone_index
             index = get_pinecone_index()
             
@@ -175,12 +177,27 @@ async def process_training_job(job_id: str) -> bool:
                         }).eq("id", source_id).execute()
                         print(f"Reconstructed {len(extracted_text)} characters from Pinecone chunks")
                     else:
-                        raise ValueError("Source has no extracted text content and no chunks found in Pinecone. Please re-upload the source.")
+                        raise ValueError(
+                            f"Source '{filename}' has no extracted text content and no chunks found in Pinecone. "
+                            f"This usually means text extraction failed during ingestion. "
+                            f"Please delete this source and re-upload it."
+                        )
                 else:
-                    raise ValueError("Source has no extracted text content and no chunks found in Pinecone. Please re-upload the source.")
+                    raise ValueError(
+                        f"Source '{filename}' has no extracted text content and no chunks found in Pinecone. "
+                        f"This usually means text extraction failed during ingestion. "
+                        f"Please delete this source and re-upload it."
+                    )
+            except ValueError:
+                # Re-raise ValueError as-is (it already has a good message)
+                raise
             except Exception as pinecone_error:
                 print(f"Error reconstructing from Pinecone: {pinecone_error}")
-                raise ValueError(f"Source has no extracted text content. Could not reconstruct from Pinecone: {str(pinecone_error)}. Please re-upload the source.")
+                raise ValueError(
+                    f"Source '{filename}' has no extracted text content. "
+                    f"Could not reconstruct from Pinecone: {str(pinecone_error)}. "
+                    f"Please delete this source and re-upload it."
+                )
         
         # Process based on job type
         if job_type == "ingestion":

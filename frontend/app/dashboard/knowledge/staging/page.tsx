@@ -71,10 +71,16 @@ export default function StagingPage() {
         fetchSources();
       } else {
         const data = await response.json();
-        setError(data.detail || 'Approval failed');
+        const errorMsg = data.detail || 'Approval failed';
+        setError(errorMsg);
+        // If error mentions missing content_text, suggest re-upload
+        if (errorMsg.includes('no extracted text') || errorMsg.includes('re-upload')) {
+          console.error('Source approval failed - missing content_text:', errorMsg);
+        }
       }
-    } catch (err) {
-      setError('Connection error');
+    } catch (err: any) {
+      console.error('Approval error:', err);
+      setError(err.message || 'Connection error');
     }
   };
 

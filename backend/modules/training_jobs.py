@@ -114,6 +114,76 @@ def list_training_jobs(twin_id: str, status: Optional[str] = None, limit: int = 
     return response.data if response.data else []
 
 
+def process_training_queue(twin_ids: List[str]) -> Dict[str, Any]:
+    """
+    Process queued training jobs for given twin IDs (synchronous batch processing).
+    
+    This is used by the API endpoint to manually trigger processing of queued jobs.
+    For production, prefer using the background worker (worker.py) instead.
+    
+    Args:
+        twin_ids: List of twin UUIDs to process jobs for
+    
+    Returns:
+        Dict with:
+            - processed: Number of jobs successfully processed
+            - failed: Number of jobs that failed
+            - remaining: Number of jobs still queued
+            - errors: List of error messages
+    """
+    import asyncio
+    
+    processed = 0
+    failed = 0
+    errors = []
+    
+    # Get all queued jobs for the given twin IDs
+    query = supabase.table("training_jobs").select("*").eq("status", "queued")
+    
+    if twin_ids:
+        query = query.in_("twin_id", twin_ids)
+    
+    query = query.order("priority", desc=True).order("created_at", desc=False).limit(50)
+    
+    response = query.execute()
+    queued_jobs = response.data if response.data else []
+    
+    # Process each job
+    for job in queued_jobs:
+        job_id = job["id"]
+        try:
+            # Run the async process_training_job in a sync context
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                success = loop.run_until_complete(process_training_job(job_id))
+            finally:
+                loop.close()
+            
+            if success:
+                processed += 1
+            else:
+                failed += 1
+                errors.append(f"Job {job_id}: Processing returned False")
+        except Exception as e:
+            failed += 1
+            errors.append(f"Job {job_id}: {str(e)}")
+    
+    # Get remaining count
+    remaining_query = supabase.table("training_jobs").select("id", count="exact").eq("status", "queued")
+    if twin_ids:
+        remaining_query = remaining_query.in_("twin_id", twin_ids)
+    remaining_response = remaining_query.execute()
+    remaining = remaining_response.count if remaining_response.count else 0
+    
+    return {
+        "processed": processed,
+        "failed": failed,
+        "remaining": remaining,
+        "errors": errors
+    }
+
+
 async def process_training_job(job_id: str) -> bool:
     """
     Main processing logic (called by worker).

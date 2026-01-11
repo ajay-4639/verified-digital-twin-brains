@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 from modules.auth_guard import verify_owner, get_current_user, verify_twin_ownership, verify_source_ownership
 from modules.ingestion import ingest_youtube_transcript_wrapper, ingest_podcast_transcript, ingest_file, ingest_url
 from modules.observability import supabase
-from modules.jobs import get_training_job, process_training_queue
+from modules.training_jobs import get_training_job, process_training_queue
 from pydantic import BaseModel
 from typing import Optional, List
 import os

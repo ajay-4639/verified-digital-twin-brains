@@ -693,6 +693,8 @@ async def ingest_url(twin_id: str, url: str) -> str:
     else:
         # Generic URL - try to fetch and extract text
         import httpx
+        file_path = None
+        text_file_path = None
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(url, follow_redirects=True)
@@ -712,8 +714,8 @@ async def ingest_url(twin_id: str, url: str) -> str:
                     from bs4 import BeautifulSoup
                     soup = BeautifulSoup(response.text, 'html.parser')
                     text = soup.get_text(separator='\n', strip=True)
-                except ImportError:
-                    # Fallback: use regex to extract text if BeautifulSoup not available
+                except Exception:
+                    # Fallback: use regex to extract text if BeautifulSoup fails or not available
                     import re
                     text = re.sub(r'<[^>]+>', '', response.text)
                     text = re.sub(r'\s+', ' ', text).strip()
@@ -724,12 +726,16 @@ async def ingest_url(twin_id: str, url: str) -> str:
                     f.write(text)
                 
                 await ingest_source(source_id, twin_id, text_file_path, url)
-                
-                # Clean up
-                for temp_file in [file_path, text_file_path]:
-                    if os.path.exists(temp_file):
-                        os.remove(temp_file)
         except Exception as e:
             raise ValueError(f"Failed to ingest URL: {e}")
+        finally:
+            # Always clean up temporary files, even if exceptions occur
+            for temp_file in [file_path, text_file_path]:
+                if temp_file and os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except Exception as cleanup_error:
+                        # Log but don't fail on cleanup errors
+                        print(f"Warning: Failed to clean up temp file {temp_file}: {cleanup_error}")
     
     return source_id

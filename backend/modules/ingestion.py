@@ -634,3 +634,96 @@ async def bulk_update_source_metadata(source_ids: List[str], metadata_updates: D
             supabase.table("sources").update(update_data).eq("id", source_id).execute()
         except Exception as e:
             print(f"Error updating source {source_id}: {e}")
+
+# Wrapper functions for router endpoints (create source_id and call actual functions)
+async def ingest_youtube_transcript_wrapper(twin_id: str, url: str) -> str:
+    """Wrapper that creates source_id and calls ingest_youtube_transcript"""
+    source_id = str(uuid.uuid4())
+    await ingest_youtube_transcript(source_id, twin_id, url)
+    return source_id
+
+async def ingest_podcast_transcript(twin_id: str, url: str) -> str:
+    """Wrapper that creates source_id and calls ingest_podcast_rss"""
+    source_id = str(uuid.uuid4())
+    await ingest_podcast_rss(source_id, twin_id, url)
+    return source_id
+
+async def ingest_file(twin_id: str, file) -> str:
+    """Wrapper that saves uploaded file and calls ingest_source"""
+    
+    source_id = str(uuid.uuid4())
+    temp_dir = "temp_uploads"
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    # Save uploaded file temporarily
+    file_extension = os.path.splitext(file.filename)[1] if file.filename else ""
+    temp_filename = f"{source_id}{file_extension}"
+    file_path = os.path.join(temp_dir, temp_filename)
+    
+    try:
+        with open(file_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+        
+        # Call ingest_source with the file path
+        await ingest_source(source_id, twin_id, file_path, file.filename)
+        
+        # Clean up temp file
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        
+        return source_id
+    except Exception as e:
+        # Clean up temp file on error
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise e
+
+async def ingest_url(twin_id: str, url: str) -> str:
+    """Wrapper that detects URL type and routes to appropriate ingestion function"""
+    source_id = str(uuid.uuid4())
+    
+    # Detect URL type and route accordingly
+    if "youtube.com" in url or "youtu.be" in url:
+        await ingest_youtube_transcript(source_id, twin_id, url)
+    elif "twitter.com" in url or "x.com" in url:
+        await ingest_x_thread(source_id, twin_id, url)
+    elif url.endswith(".rss") or "feed" in url.lower() or "podcast" in url.lower():
+        await ingest_podcast_rss(source_id, twin_id, url)
+    else:
+        # Generic URL - try to fetch and extract text
+        import httpx
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, follow_redirects=True)
+                response.raise_for_status()
+                
+                # Save content to temp file
+                temp_dir = "temp_uploads"
+                os.makedirs(temp_dir, exist_ok=True)
+                temp_filename = f"{source_id}.html"
+                file_path = os.path.join(temp_dir, temp_filename)
+                
+                with open(file_path, "wb") as f:
+                    f.write(response.content)
+                
+                # Extract text from HTML (basic extraction)
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(response.text, 'html.parser')
+                text = soup.get_text(separator='\n', strip=True)
+                
+                # Save as text file and ingest
+                text_file_path = os.path.join(temp_dir, f"{source_id}.txt")
+                with open(text_file_path, "w", encoding="utf-8") as f:
+                    f.write(text)
+                
+                await ingest_source(source_id, twin_id, text_file_path, url)
+                
+                # Clean up
+                for temp_file in [file_path, text_file_path]:
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
+        except Exception as e:
+            raise ValueError(f"Failed to ingest URL: {e}")
+    
+    return source_id

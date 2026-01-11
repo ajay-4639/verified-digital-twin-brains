@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
 from modules.auth_guard import verify_owner, get_current_user, verify_twin_ownership, verify_source_ownership
-from modules.ingestion import ingest_youtube_transcript, ingest_podcast_transcript, ingest_file, ingest_url
+from modules.ingestion import ingest_youtube_transcript_wrapper, ingest_podcast_transcript, ingest_file, ingest_url
 from modules.observability import supabase
 from modules.jobs import get_training_job, process_training_queue
 from pydantic import BaseModel
@@ -22,7 +22,7 @@ class URLIngestRequest(BaseModel):
 @router.post("/ingest/youtube/{twin_id}")
 async def ingest_youtube(twin_id: str, request: YouTubeIngestRequest, user=Depends(verify_owner)):
     try:
-        source_id = await ingest_youtube_transcript(twin_id, request.url)
+        source_id = await ingest_youtube_transcript_wrapper(twin_id, request.url)
         return {"source_id": source_id, "status": "processing"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

@@ -154,7 +154,7 @@ export default function KnowledgePage() {
     formData.append('file', file);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/ingest/${twinId}`, {
+      const response = await fetch(`${API_BASE_URL}/ingest/file/${twinId}`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` },
         body: formData,

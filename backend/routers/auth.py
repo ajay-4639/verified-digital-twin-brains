@@ -85,21 +85,9 @@ async def sync_user(user=Depends(get_current_user)):
     avatar_url = user.get("avatar_url") or user.get("user_metadata", {}).get("avatar_url")
     print(f"[SYNC DEBUG] full_name: {full_name}, avatar_url: {avatar_url}")
     
-    # Create user record
-    print(f"[SYNC DEBUG] Inserting into users table...")
-    try:
-        # Minimal insert - only id and email (the columns that MUST exist)
-        user_insert = supabase.table("users").insert({
-            "id": user_id,
-            "email": email
-        }).execute()
-        print(f"[SYNC DEBUG] User created successfully with minimal schema")
-    except Exception as e:
-        print(f"[SYNC DEBUG] ERROR creating user: {e}")
-        raise
-    
-    # Create default tenant for this user
-    print(f"[SYNC DEBUG] Creating tenant...")
+    # IMPORTANT: Create tenant FIRST, then user with tenant_id
+    # This fixes the OAuth signup error where tenant_id was required but didn't exist yet
+    print(f"[SYNC DEBUG] Creating tenant first...")
     try:
         tenant_insert = supabase.table("tenants").insert({
             "owner_id": user_id,
@@ -110,6 +98,27 @@ async def sync_user(user=Depends(get_current_user)):
         raise
     
     tenant_id = tenant_insert.data[0]["id"] if tenant_insert.data else None
+    print(f"[SYNC DEBUG] Tenant created with id: {tenant_id}")
+    
+    # Now create user record with tenant_id
+    print(f"[SYNC DEBUG] Inserting into users table with tenant_id...")
+    try:
+        user_insert = supabase.table("users").insert({
+            "id": user_id,
+            "email": email,
+            "tenant_id": tenant_id
+        }).execute()
+        print(f"[SYNC DEBUG] User created successfully with tenant_id")
+    except Exception as e:
+        print(f"[SYNC DEBUG] ERROR creating user: {e}")
+        # If user creation fails, try to clean up the tenant
+        if tenant_id:
+            try:
+                supabase.table("tenants").delete().eq("id", tenant_id).execute()
+                print(f"[SYNC DEBUG] Cleaned up tenant after user creation failure")
+            except:
+                pass
+        raise
     
     return SyncUserResponse(
         status="created",

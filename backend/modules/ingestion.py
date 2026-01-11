@@ -708,9 +708,15 @@ async def ingest_url(twin_id: str, url: str) -> str:
                     f.write(response.content)
                 
                 # Extract text from HTML (basic extraction)
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(response.text, 'html.parser')
-                text = soup.get_text(separator='\n', strip=True)
+                try:
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    text = soup.get_text(separator='\n', strip=True)
+                except ImportError:
+                    # Fallback: use regex to extract text if BeautifulSoup not available
+                    import re
+                    text = re.sub(r'<[^>]+>', '', response.text)
+                    text = re.sub(r'\s+', ' ', text).strip()
                 
                 # Save as text file and ingest
                 text_file_path = os.path.join(temp_dir, f"{source_id}.txt")

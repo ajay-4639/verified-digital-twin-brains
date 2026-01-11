@@ -52,16 +52,8 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
     # ============================================================
     # Strategy 1: YouTubeTranscriptApi (official transcripts - FREE)
     # ============================================================
-    cookies_file = os.path.join(os.path.dirname(__file__), '..', 'youtube_cookies.txt')
-    
     try:
-        # Pass cookies if available to bypass IP blocks
-        if os.path.exists(cookies_file):
-            print(f"[YouTube] Using cookies for transcript API: {cookies_file}")
-            transcript_snippets = YouTubeTranscriptApi().fetch(video_id, cookies=cookies_file)
-        else:
-            transcript_snippets = YouTubeTranscriptApi().fetch(video_id)
-            
+        transcript_snippets = YouTubeTranscriptApi().fetch(video_id)
         text = " ".join([item.text for item in transcript_snippets])
         log_ingestion_event(source_id, twin_id, "info", f"Fetched official YouTube transcript")
     except Exception as e:
@@ -75,7 +67,7 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
     if not text:
         try:
             from youtube_transcript_api import YouTubeTranscriptApi as YTA
-            transcript_list = YTA.list_transcripts(video_id, cookies=cookies_file if os.path.exists(cookies_file) else None)
+            transcript_list = YTA.list_transcripts(video_id)
             
             # Try all available transcripts
             for transcript in transcript_list:
@@ -115,13 +107,14 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
                 'quiet': True,
                 'no_warnings': True,
                 # Cookie options for authenticated access
-                'cookiesfrombrowser': ('chrome',) if os.name == 'nt' else None,
+                'cookiesfrombrowser': ('chrome',) if os.name == 'nt' else None,  # Use Chrome cookies on Windows
             }
             
             # Check for cookies file (more reliable than browser extraction)
+            cookies_file = os.path.join(os.path.dirname(__file__), '..', 'youtube_cookies.txt')
             if os.path.exists(cookies_file):
                 ydl_opts['cookiefile'] = cookies_file
-                print(f"[YouTube] Using cookies file for yt-dlp: {cookies_file}")
+                print(f"[YouTube] Using cookies file: {cookies_file}")
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
@@ -141,12 +134,12 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
             print(f"[YouTube] Download + transcription failed: {error_str}")
             
             # Provide user-friendly error message
-            if "Sign in to confirm" in error_str or "bot" in error_str.lower() or "blocking" in error_str.lower():
-                hint = "Ensure 'backend/youtube_cookies.txt' exists and contains valid Netscape cookies."
+            if "Sign in to confirm" in error_str or "bot" in error_str.lower():
                 raise ValueError(
-                    "YouTube is blocking the connection (IP blocked or bot detection). "
-                    f"{hint} "
-                    f"Original error: {transcript_error or error_str}"
+                    "YouTube requires authentication for this video. "
+                    "Please try a video with closed captions (CC), or ensure "
+                    "the server has valid YouTube cookies configured. "
+                    f"Original error: {transcript_error or 'No captions available'}"
                 )
             else:
                 raise ValueError(f"Could not ingest YouTube video: {download_error}")
@@ -521,22 +514,11 @@ async def approve_source(source_id: str) -> str:
         Training job ID
     """
     # Get source to verify it exists and get twin_id
-    source_response = supabase.table("sources").select("twin_id, staging_status, content_text, filename").eq("id", source_id).single().execute()
+    source_response = supabase.table("sources").select("twin_id, staging_status").eq("id", source_id).single().execute()
     if not source_response.data:
         raise ValueError(f"Source {source_id} not found")
     
-    source_data = source_response.data
-    twin_id = source_data["twin_id"]
-    content_text = source_data.get("content_text")
-    
-    # Validate source has content_text before approving
-    if not content_text or len(content_text.strip()) == 0:
-        filename = source_data.get("filename", "Unknown")
-        raise ValueError(
-            f"Source '{filename}' has no extracted text content. "
-            f"This usually means text extraction failed during ingestion. "
-            f"Please delete and re-upload this source."
-        )
+    twin_id = source_response.data["twin_id"]
     
     # Update staging status
     supabase.table("sources").update({

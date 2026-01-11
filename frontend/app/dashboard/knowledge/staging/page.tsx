@@ -28,6 +28,7 @@ export default function StagingPage() {
   const [error, setError] = useState<string | null>(null);
   const [processingQueue, setProcessingQueue] = useState(false);
   const [queueStatus, setQueueStatus] = useState<{processed: number; failed: number; remaining: number} | null>(null);
+  const [reExtractingId, setReExtractingId] = useState<string | null>(null);
 
   const twinId = activeTwin?.id;
 
@@ -99,6 +100,35 @@ export default function StagingPage() {
     } catch (err) {
       setError('Connection error');
     }
+  };
+
+  const handleReExtract = async (sourceId: string) => {
+    setReExtractingId(sourceId);
+    setError(null);
+    
+    try {
+      const response = await post(`/sources/${sourceId}/re-extract`);
+      const data = await response.json();
+      
+      if (response.ok) {
+        setError(null);
+        // Show success message briefly
+        alert(`Success: ${data.message}. Source has been reset to "staged" - please re-approve it.`);
+        fetchSources();
+      } else {
+        setError(data.detail || 'Re-extraction failed');
+      }
+    } catch (err: any) {
+      console.error('Re-extract error:', err);
+      setError(err.message || 'Connection error during re-extraction');
+    } finally {
+      setReExtractingId(null);
+    }
+  };
+
+  // Check if a source is an X Thread (can be re-extracted)
+  const isXThreadSource = (filename: string) => {
+    return filename?.startsWith('X Thread:');
   };
 
   const handleBulkApprove = async () => {
@@ -395,6 +425,29 @@ export default function StagingPage() {
                               Reject
                             </button>
                           </>
+                        )}
+                        {/* Re-extract button for X Thread sources with issues */}
+                        {isXThreadSource(s.filename) && (s.staging_status === 'approved' || !s.extracted_text_length) && (
+                          <button
+                            onClick={() => handleReExtract(s.id)}
+                            disabled={reExtractingId === s.id}
+                            className="px-3 py-1.5 bg-amber-500 text-white rounded-lg text-xs font-bold hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center gap-1"
+                            title="Re-fetch content from X API"
+                          >
+                            {reExtractingId === s.id ? (
+                              <>
+                                <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white"></div>
+                                Extracting...
+                              </>
+                            ) : (
+                              <>
+                                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                </svg>
+                                Re-extract
+                              </>
+                            )}
+                          </button>
                         )}
                       </div>
                     </td>

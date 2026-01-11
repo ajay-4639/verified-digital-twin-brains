@@ -9,6 +9,7 @@ from routers import (
     twins,
     actions,
     knowledge,
+    sources,
     governance,
     escalations,
     specializations,
@@ -41,6 +42,7 @@ app.include_router(ingestion.router)
 app.include_router(twins.router)
 app.include_router(actions.router)
 app.include_router(knowledge.router)
+app.include_router(sources.router)
 app.include_router(governance.router)
 app.include_router(escalations.router)
 app.include_router(specializations.router)

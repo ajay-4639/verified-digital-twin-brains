@@ -170,9 +170,11 @@ async def process_queue_endpoint(twin_id: Optional[str] = None, user=Depends(ver
     """Process all queued jobs (on-demand, runs in API process)"""
     from modules.job_queue import dequeue_job, get_queue_length
     from modules.training_jobs import process_training_job
+    import traceback
     
     processed = 0
     failed = 0
+    errors = []  # Track error messages
     max_jobs = 10  # Process up to 10 jobs per request to avoid timeout
     
     # First, try to process from queue
@@ -183,44 +185,74 @@ async def process_queue_endpoint(twin_id: Optional[str] = None, user=Depends(ver
         
         job_id = job["job_id"]
         try:
-            print(f"Processing job {job_id} from queue")
+            print(f"[Process Queue] Processing job {job_id} from queue")
             success = await process_training_job(job_id)
             if success:
                 processed += 1
+                print(f"[Process Queue] Job {job_id} completed successfully")
             else:
                 failed += 1
+                errors.append(f"Job {job_id}: Processing returned False")
         except Exception as e:
-            print(f"Error processing job {job_id}: {e}")
+            error_msg = f"Job {job_id}: {str(e)}"
+            print(f"[Process Queue] Error processing job {job_id}: {e}")
+            print(traceback.format_exc())
+            errors.append(error_msg)
             failed += 1
     
     # Fallback: If queue is empty but there are queued jobs in DB, process them directly
     if processed == 0 and twin_id:
         try:
+            print(f"[Process Queue] Queue empty, checking database for queued jobs (twin_id: {twin_id})")
             queued_jobs = list_training_jobs(twin_id, status="queued", limit=max_jobs)
+            print(f"[Process Queue] Found {len(queued_jobs)} queued jobs in database")
+            
             for job in queued_jobs:
                 job_id = job["id"]
                 try:
-                    print(f"Processing job {job_id} from database (queue was empty)")
+                    print(f"[Process Queue] Processing job {job_id} from database (queue was empty)")
                     success = await process_training_job(job_id)
                     if success:
                         processed += 1
+                        print(f"[Process Queue] Job {job_id} completed successfully")
                     else:
                         failed += 1
+                        errors.append(f"Job {job_id}: Processing returned False")
                 except Exception as e:
-                    print(f"Error processing job {job_id}: {e}")
+                    error_msg = f"Job {job_id}: {str(e)}"
+                    print(f"[Process Queue] Error processing job {job_id}: {e}")
+                    print(traceback.format_exc())
+                    errors.append(error_msg)
                     failed += 1
         except Exception as e:
-            print(f"Error fetching queued jobs from database: {e}")
+            error_msg = f"Error fetching queued jobs from database: {str(e)}"
+            print(f"[Process Queue] {error_msg}")
+            print(traceback.format_exc())
+            errors.append(error_msg)
     
     remaining = get_queue_length()
     
-    return {
-        "status": "success",
+    # Determine status based on results
+    if failed > 0 and processed == 0:
+        status = "error"
+    elif failed > 0:
+        status = "partial"
+    else:
+        status = "success"
+    
+    response = {
+        "status": status,
         "processed": processed,
         "failed": failed,
         "remaining": remaining,
         "message": f"Processed {processed} job(s), {failed} failed, {remaining} remaining in queue"
     }
+    
+    # Include error details if any
+    if errors:
+        response["errors"] = errors[:5]  # Limit to first 5 errors to avoid huge response
+    
+    return response
 
 @router.get("/training-jobs/{job_id}")
 async def get_training_job_endpoint(job_id: str, user=Depends(get_current_user)):

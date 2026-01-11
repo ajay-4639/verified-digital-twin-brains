@@ -42,14 +42,41 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
         raise ValueError("Invalid YouTube URL")
     
     text = None
+    transcript_error = None
+    
+    # Method 1: Try YouTubeTranscriptApi (official transcripts)
     try:
-        # 1. Try fetching official transcript first (fastest)
         transcript_snippets = YouTubeTranscriptApi().fetch(video_id)
         text = " ".join([item.text for item in transcript_snippets])
+        log_ingestion_event(source_id, twin_id, "info", f"Fetched official YouTube transcript")
     except Exception as e:
-        print(f"Transcript API failed, falling back to Whisper: {e}")
-        log_ingestion_event(source_id, twin_id, "warning", f"Transcript API failed, using Whisper: {e}")
-        # 2. Fallback: Download audio and use Whisper
+        transcript_error = str(e)
+        print(f"Transcript API failed: {e}")
+        log_ingestion_event(source_id, twin_id, "warning", f"Transcript API failed: {e}")
+    
+    # Method 2: Try with different languages if available
+    if not text:
+        try:
+            # Try to get available transcript languages
+            from youtube_transcript_api import YouTubeTranscriptApi as YTA
+            transcript_list = YTA.list_transcripts(video_id)
+            
+            # Try generated transcripts first
+            for transcript in transcript_list:
+                try:
+                    fetched = transcript.fetch()
+                    text = " ".join([item['text'] for item in fetched])
+                    log_ingestion_event(source_id, twin_id, "info", f"Fetched {transcript.language} transcript")
+                    break
+                except:
+                    continue
+        except Exception as e:
+            print(f"Alternative transcript fetch failed: {e}")
+    
+    # Method 3: yt-dlp fallback (may fail due to YouTube bot detection)
+    if not text:
+        print("Attempting yt-dlp fallback (may be blocked by YouTube)...")
+        log_ingestion_event(source_id, twin_id, "warning", "Attempting yt-dlp fallback")
         try:
             temp_dir = "temp_uploads"
             os.makedirs(temp_dir, exist_ok=True)
@@ -63,6 +90,8 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
                     'preferredcodec': 'mp3',
                     'preferredquality': '192',
                 }],
+                'quiet': True,
+                'no_warnings': True,
             }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -73,12 +102,26 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
             
             if os.path.exists(audio_path):
                 os.remove(audio_path)
-        except Exception as fallback_e:
-            print(f"Fallback also failed: {fallback_e}")
-            raise ValueError(f"Could not ingest YouTube video: {fallback_e}")
+        except Exception as yt_dlp_error:
+            error_str = str(yt_dlp_error)
+            print(f"yt-dlp fallback failed: {error_str}")
+            
+            # Provide user-friendly error message
+            if "Sign in to confirm" in error_str or "bot" in error_str.lower():
+                raise ValueError(
+                    f"YouTube is blocking automated access. "
+                    f"This video may not have captions available. "
+                    f"Try a different video with closed captions, or contact support. "
+                    f"Original error: {transcript_error or error_str}"
+                )
+            else:
+                raise ValueError(f"Could not ingest YouTube video: {yt_dlp_error}")
 
     if not text:
-        raise ValueError("No text could be extracted from the video")
+        raise ValueError(
+            "No transcript could be extracted. This video may not have captions. "
+            "YouTube blocks automated downloads for videos without captions."
+        )
         
     try:
         # Phase 6: Staging workflow - extract and stage, don't index yet
@@ -243,14 +286,8 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[st
         chunks.append(text[i:i + chunk_size])
     return chunks
 
-def get_embedding(text: str):
-    client = get_openai_client()
-    response = client.embeddings.create(
-        input=text,
-        model="text-embedding-3-large",
-        dimensions=3072
-    )
-    return response.data[0].embedding
+# Embedding generation moved to modules.embeddings
+from modules.embeddings import get_embedding
 
 async def analyze_chunk_content(text: str) -> dict:
     """
@@ -304,7 +341,8 @@ async def process_and_index_text(source_id: str, twin_id: str, text: str, metada
             "text": chunk, # Keep original text for grounding
             "synthetic_questions": synth_questions,
             "category": analysis.get("category", "FACT"),
-            "tone": analysis.get("tone", "Neutral")
+            "tone": analysis.get("tone", "Neutral"),
+            "is_verified": False  # Explicitly mark regular sources as not verified
         }
         
         # Add opinion mapping if present

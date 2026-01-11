@@ -1,10 +1,13 @@
 import os
 import asyncio
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 from modules.clients import get_openai_client, get_pinecone_index, get_cohere_client
 from modules.verified_qna import match_verified_qna
 from modules.observability import supabase
 from modules.access_groups import get_default_group
+
+# Embedding generation moved to modules.embeddings
+from modules.embeddings import get_embedding, get_embeddings_async
 
 # Langfuse v3 tracing
 try:
@@ -17,36 +20,6 @@ except ImportError:
         def decorator(func):
             return func
         return decorator
-
-def get_embedding(text: str):
-    """
-    Synchronous embedding call for backward compatibility if needed.
-    """
-    client = get_openai_client()
-    response = client.embeddings.create(
-        input=text,
-        model="text-embedding-3-large",
-        dimensions=3072
-    )
-    return response.data[0].embedding
-
-async def get_embeddings_async(texts: List[str]) -> List[List[float]]:
-    """
-    Batch gets embeddings for a list of texts asynchronously.
-    """
-    client = get_openai_client()
-    loop = asyncio.get_event_loop()
-    
-    # OpenAI client is thread-safe, we use run_in_executor for the blocking network call
-    def _fetch():
-        response = client.embeddings.create(
-            input=texts,
-            model="text-embedding-3-large",
-            dimensions=3072
-        )
-        return [d.embedding for d in response.data]
-        
-    return await loop.run_in_executor(None, _fetch)
 
 async def expand_query(query: str) -> List[str]:
     """
@@ -98,39 +71,280 @@ async def generate_hyde_answer(query: str) -> str:
         print(f"Error generating HyDE answer: {e}")
         return query
 
+
 def rrf_merge(results_list: List[List[Dict[str, Any]]], k: int = 60) -> List[Dict[str, Any]]:
     """
-    Reciprocal Rank Fusion to merge multiple ranked lists.
+    Reciprocal Rank Fusion (RRF) merge of multiple result lists.
+    
+    Args:
+        results_list: List of result lists from different queries
+        k: RRF constant (default 60)
+        
+    Returns:
+        Merged and ranked results by RRF score
     """
-    rrf_scores = {}
-    doc_map = {}
+    # Build score map: {doc_id: rrf_score}
+    score_map: Dict[str, float] = {}
     
     for results in results_list:
-        for rank, hit in enumerate(results):
-            # Use text content as key for deduplication
-            doc_id = hit["metadata"].get("text", "")
-            if not doc_id:
-                continue
-                
-            if doc_id not in rrf_scores:
-                rrf_scores[doc_id] = 0
-                doc_map[doc_id] = hit
-                
-            rrf_scores[doc_id] += 1.0 / (k + rank + 1)
-            
-    # Sort by RRF score
-    sorted_docs = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
+        for rank, hit in enumerate(results, start=1):
+            doc_id = hit.get("id", str(hit))
+            score_map[doc_id] = score_map.get(doc_id, 0.0) + 1.0 / (k + rank)
     
+    # Build reverse index: {doc_id: hit}
+    doc_map: Dict[str, Dict[str, Any]] = {}
+    for results in results_list:
+        for hit in results:
+            doc_id = hit.get("id", str(hit))
+            if doc_id not in doc_map:
+                doc_map[doc_id] = hit
+    
+    # Sort by RRF score (descending)
+    sorted_docs = sorted(score_map.items(), key=lambda x: x[1], reverse=True)
+    
+    # Build final results with RRF scores
     final_results = []
-    for doc_id in sorted_docs:
-        hit = doc_map[doc_id]
-        hit["rrf_score"] = rrf_scores[doc_id]
+    for doc_id, rrf_score in sorted_docs:
+        hit = doc_map[doc_id].copy()
+        hit["rrf_score"] = rrf_score
         final_results.append(hit)
         
     return final_results
 
+
+def _format_verified_match_context(verified_match: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Format a verified QnA match as a context entry.
+    
+    Args:
+        verified_match: Verified QnA match result
+        
+    Returns:
+        Formatted context dictionary
+    """
+    return {
+        "text": verified_match["answer"],
+        "score": 1.0,  # Perfect confidence for verified answers
+        "source_id": f"verified_qna_{verified_match['id']}",
+        "is_verified": True,
+        "verified_qna_match": True,
+        "question": verified_match["question"],
+        "category": "FACT",
+        "tone": "Assertive",
+        "citations": verified_match.get("citations", [])
+    }
+
+
+def _prepare_search_queries(query: str) -> List[str]:
+    """
+    Prepare search queries using query expansion and HyDE.
+    
+    Args:
+        query: Original query
+        
+    Returns:
+        List of search queries (including original, HyDE, and expansions)
+    """
+    async def _prepare():
+        expanded_task = expand_query(query)
+        hyde_task = generate_hyde_answer(query)
+        expanded_queries, hyde_answer = await asyncio.gather(expanded_task, hyde_task)
+        return list(set([query, hyde_answer] + expanded_queries))
+    
+    # Run async function
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        # If loop is already running, we need to handle this differently
+        # For now, just use the original query
+        return [query]
+    else:
+        return loop.run_until_complete(_prepare())
+
+
+async def _execute_pinecone_queries(
+    embeddings: List[List[float]],
+    twin_id: str,
+    timeout: float = 5.0
+) -> List[Dict[str, Any]]:
+    """
+    Execute Pinecone queries for all embeddings.
+    
+    Args:
+        embeddings: List of embedding vectors
+        twin_id: Twin ID (namespace)
+        timeout: Timeout in seconds
+        
+    Returns:
+        List of query results
+    """
+    index = get_pinecone_index()
+    loop = asyncio.get_event_loop()
+    
+    async def pinecone_query(embedding: List[float], is_verified: bool = False) -> Dict[str, Any]:
+        """Execute a single Pinecone query."""
+        top_k = 5 if is_verified else 20
+        
+        def _fetch():
+            query_params = {
+                "vector": embedding,
+                "top_k": top_k,
+                "include_metadata": True,
+                "namespace": twin_id,
+            }
+            # Only filter for verified search
+            # For general search, don't filter - search all vectors in namespace
+            # This ensures sources without is_verified field are included
+            if is_verified:
+                query_params["filter"] = {"is_verified": {"$eq": True}}
+            
+            return index.query(**query_params)
+        return await loop.run_in_executor(None, _fetch)
+    
+    # Use original query for verified search
+    verified_task = pinecone_query(embeddings[0], is_verified=True)
+    
+    # Use all variations for general search
+    general_tasks = [pinecone_query(emb, is_verified=False) for emb in embeddings]
+    
+    try:
+        all_results = await asyncio.wait_for(
+            asyncio.gather(verified_task, *general_tasks),
+            timeout=timeout
+        )
+        return all_results
+    except asyncio.TimeoutError:
+        print(f"[Retrieval] Vector search timed out after {timeout}s, returning empty contexts")
+        return []
+    except Exception as e:
+        print(f"[Retrieval] Vector search failed: {e}, returning empty contexts")
+        return []
+
+
+def _process_verified_matches(verified_results: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Process verified vector matches into context entries.
+    
+    Args:
+        verified_results: Pinecone query results for verified vectors
+        
+    Returns:
+        List of formatted context entries
+    """
+    contexts = []
+    for match in verified_results.get("matches", []):
+        if match["score"] > 0.3:
+            contexts.append({
+                "text": match["metadata"]["text"],
+                "score": 1.0,  # Boost verified
+                "source_id": match["metadata"].get("source_id", "verified_memory"),
+                "is_verified": True,
+                "category": match["metadata"].get("category", "FACT"),
+                "tone": match["metadata"].get("tone", "Assertive"),
+                "opinion_topic": match["metadata"].get("opinion_topic"),
+                "opinion_stance": match["metadata"].get("opinion_stance"),
+                "opinion_intensity": match["metadata"].get("opinion_intensity")
+            })
+    return contexts
+
+
+def _process_general_matches(merged_general_hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Process general vector matches into context entries.
+    
+    Args:
+        merged_general_hits: RRF-merged general search results
+        
+    Returns:
+        List of formatted context entries
+    """
+    raw_general_chunks = []
+    for match in merged_general_hits:
+        raw_general_chunks.append({
+            "text": match["metadata"]["text"],
+            "score": match.get("score", 0.0),
+            "rrf_score": match.get("rrf_score", 0.0),
+            "source_id": match["metadata"].get("source_id", "unknown"),
+            "is_verified": False,
+            "category": match["metadata"].get("category", "FACT"),
+            "tone": match["metadata"].get("tone", "Neutral"),
+            "opinion_topic": match["metadata"].get("opinion_topic"),
+            "opinion_stance": match["metadata"].get("opinion_stance"),
+            "opinion_intensity": match["metadata"].get("opinion_intensity")
+        })
+    return raw_general_chunks
+
+
+def _filter_by_group_permissions(
+    contexts: List[Dict[str, Any]],
+    group_id: Optional[str]
+) -> List[Dict[str, Any]]:
+    """
+    Filter contexts by group permissions.
+    
+    Args:
+        contexts: List of context entries
+        group_id: Optional group ID to filter by
+        
+    Returns:
+        Filtered list of contexts
+    """
+    if not group_id:
+        return contexts
+    
+    # Get allowed source_ids for this group
+    permissions_response = supabase.table("content_permissions").select("content_id").eq(
+        "group_id", group_id
+    ).eq("content_type", "source").execute()
+    
+    allowed_source_ids = {str(perm["content_id"]) for perm in (permissions_response.data or [])}
+    
+    # Filter contexts to only include chunks from allowed sources
+    # Also allow verified memory (is_verified=True chunks) - they're always accessible
+    filtered_contexts = []
+    for c in contexts:
+        source_id = str(c.get("source_id", ""))
+        is_verified = c.get("is_verified", False)
+        
+        # Allow if verified memory OR if source_id matches an allowed source
+        if is_verified or source_id in allowed_source_ids:
+            filtered_contexts.append(c)
+    
+    return filtered_contexts
+
+
+def _deduplicate_and_limit(
+    contexts: List[Dict[str, Any]],
+    top_k: int
+) -> List[Dict[str, Any]]:
+    """
+    Deduplicate contexts by text and limit to top_k.
+    
+    Args:
+        contexts: List of context entries
+        top_k: Maximum number of contexts to return
+        
+    Returns:
+        Deduplicated and limited list of contexts
+    """
+    seen = set()
+    final_contexts = []
+    
+    for c in contexts:
+        text = c["text"]
+        if text not in seen:
+            seen.add(text)
+            final_contexts.append(c)
+    
+    return final_contexts[:top_k]
+
+
 @observe(name="rag_retrieval")
-async def retrieve_context_with_verified_first(query: str, twin_id: str, group_id: Optional[str] = None, top_k: int = 5):
+async def retrieve_context_with_verified_first(
+    query: str,
+    twin_id: str,
+    group_id: Optional[str] = None,
+    top_k: int = 5
+) -> List[Dict[str, Any]]:
     """
     Retrieval pipeline with verified-first order: Check verified QnA → vectors → tools.
     Returns contexts with verified_qna_match flag if verified answer found.
@@ -145,29 +359,34 @@ async def retrieve_context_with_verified_first(query: str, twin_id: str, group_i
             # If no default group exists, proceed without group filtering (backward compatibility)
             group_id = None
     
-    # STEP 1: Check Verified QnA first (highest priority)
-    verified_match = await match_verified_qna(query, twin_id, group_id=group_id, use_exact=True, use_semantic=False, exact_threshold=0.7)
+    # STEP 1: Check Verified QnA first (highest priority) - P1-C: 2s timeout
+    try:
+        verified_match = await asyncio.wait_for(
+            match_verified_qna(query, twin_id, group_id=group_id, use_exact=True, use_semantic=True, exact_threshold=0.7, semantic_threshold=0.75),
+            timeout=2.0
+        )
+    except asyncio.TimeoutError:
+        print(f"[Retrieval] Verified QnA lookup timed out after 2s, falling back to vector retrieval")
+        verified_match = None
+    except Exception as e:
+        print(f"[Retrieval] Verified QnA lookup failed: {e}, falling back to vector retrieval")
+        verified_match = None
     
     if verified_match and verified_match.get("similarity_score", 0) >= 0.7:
         # Found a high-confidence verified answer - return immediately
-        return [{
-            "text": verified_match["answer"],
-            "score": 1.0,  # Perfect confidence for verified answers
-            "source_id": f"verified_qna_{verified_match['id']}",
-            "is_verified": True,
-            "verified_qna_match": True,
-            "question": verified_match["question"],
-            "category": "FACT",
-            "tone": "Assertive",
-            "citations": verified_match.get("citations", [])
-        }]
+        return [_format_verified_match_context(verified_match)]
     
     # STEP 2: No verified match - proceed with vector retrieval
     return await retrieve_context_vectors(query, twin_id, group_id=group_id, top_k=top_k)
 
 
 @observe(name="rag_vector_retrieval")
-async def retrieve_context_vectors(query: str, twin_id: str, group_id: Optional[str] = None, top_k: int = 5):
+async def retrieve_context_vectors(
+    query: str,
+    twin_id: str,
+    group_id: Optional[str] = None,
+    top_k: int = 5
+) -> List[Dict[str, Any]]:
     """
     Optimized retrieval pipeline using HyDE, Query Expansion, and RRF (vector-only).
     Used when no verified QnA match is found.
@@ -184,31 +403,11 @@ async def retrieve_context_vectors(query: str, twin_id: str, group_id: Optional[
     # 2. Parallel Embedding Generation (Batch)
     all_embeddings = await get_embeddings_async(search_queries)
     
-    # 3. Parallel Vector Search
-    index = get_pinecone_index()
-    loop = asyncio.get_event_loop()
+    # 3. Parallel Vector Search - P1-C: 5s timeout
+    all_results = await _execute_pinecone_queries(all_embeddings, twin_id, timeout=5.0)
     
-    async def pinecone_query(embedding, is_verified=False):
-        tk = 5 if is_verified else 20
-        filter_dict = {"is_verified": {"$eq": True}} if is_verified else {"is_verified": {"$ne": True}}
-        
-        def _fetch():
-            return index.query(
-                vector=embedding,
-                top_k=tk,
-                include_metadata=True,
-                namespace=twin_id,
-                filter=filter_dict
-            )
-        return await loop.run_in_executor(None, _fetch)
-
-    # Use original query for verified search
-    verified_task = pinecone_query(all_embeddings[0], is_verified=True)
-    
-    # Use all variations for general search
-    general_tasks = [pinecone_query(emb, is_verified=False) for emb in all_embeddings]
-    
-    all_results = await asyncio.gather(verified_task, *general_tasks)
+    if not all_results:
+        return []
     
     verified_results = all_results[0]
     general_results_list = [res["matches"] for res in all_results[1:]]
@@ -216,111 +415,16 @@ async def retrieve_context_vectors(query: str, twin_id: str, group_id: Optional[
     # 4. RRF Merge general results
     merged_general_hits = rrf_merge(general_results_list)
     
-    contexts = []
+    # 5. Process matches into contexts
+    contexts = _process_verified_matches(verified_results)
+    raw_general_chunks = _process_general_matches(merged_general_hits)
+    contexts.extend(raw_general_chunks)
     
-    # Process verified matches
-    for match in verified_results["matches"]:
-        if match["score"] > 0.3:
-            contexts.append({
-                "text": match["metadata"]["text"],
-                "score": 1.0, # Boost verified
-                "source_id": match["metadata"].get("source_id", "verified_memory"),
-                "is_verified": True,
-                "category": match["metadata"].get("category", "FACT"),
-                "tone": match["metadata"].get("tone", "Assertive"),
-                "opinion_topic": match["metadata"].get("opinion_topic"),
-                "opinion_stance": match["metadata"].get("opinion_stance"),
-                "opinion_intensity": match["metadata"].get("opinion_intensity")
-            })
+    # 6. Filter by group permissions if group_id is provided
+    contexts = _filter_by_group_permissions(contexts, group_id)
     
-    # Process general matches for reranking
-    raw_general_chunks = []
-    for match in merged_general_hits:
-        raw_general_chunks.append({
-            "text": match["metadata"]["text"],
-            "score": match.get("score", 0.0),
-            "rrf_score": match.get("rrf_score", 0.0),
-            "source_id": match["metadata"].get("source_id", "unknown"),
-            "is_verified": False,
-            "category": match["metadata"].get("category", "FACT"),
-            "tone": match["metadata"].get("tone", "Neutral"),
-            "opinion_topic": match["metadata"].get("opinion_topic"),
-            "opinion_stance": match["metadata"].get("opinion_stance"),
-            "opinion_intensity": match["metadata"].get("opinion_intensity")
-        })
-    
-    # Filter by group permissions if group_id is provided
-    if group_id:
-        # Get allowed source_ids for this group (convert to strings for comparison)
-        permissions_response = supabase.table("content_permissions").select("content_id").eq(
-            "group_id", group_id
-        ).eq("content_type", "source").execute()
-        
-        allowed_source_ids = {str(perm["content_id"]) for perm in (permissions_response.data or [])}
-        
-        # Filter contexts to only include chunks from allowed sources
-        # Also allow verified memory (is_verified=True chunks) - they're always accessible
-        filtered_contexts = []
-        for c in contexts:
-            source_id = str(c.get("source_id", ""))
-            is_verified = c.get("is_verified", False)
-            
-            # Allow if verified memory OR if source_id matches an allowed source
-            if is_verified or source_id in allowed_source_ids:
-                filtered_contexts.append(c)
-        
-        contexts = filtered_contexts
-        
-        # Also filter raw_general_chunks for reranking
-        filtered_raw_chunks = []
-        for c in raw_general_chunks:
-            source_id = str(c.get("source_id", ""))
-            is_verified = c.get("is_verified", False)
-            
-            if is_verified or source_id in allowed_source_ids:
-                filtered_raw_chunks.append(c)
-        
-        raw_general_chunks = filtered_raw_chunks
-    
-    # 5. Reranking Step
-    cohere_client = get_cohere_client()
-    if cohere_client and raw_general_chunks:
-        try:
-            print(f"Reranking {len(raw_general_chunks[:30])} chunks with Cohere...")
-            documents = [c["text"] for c in raw_general_chunks[:30]]
-            
-            def _rerank():
-                return cohere_client.rerank(
-                    model="rerank-v3.5",
-                    query=query,
-                    documents=documents,
-                    top_n=top_k
-                )
-                
-            rerank_res = await loop.run_in_executor(None, _rerank)
-            
-            reranked_contexts = []
-            for result in rerank_res.results:
-                original_chunk = raw_general_chunks[result.index]
-                original_chunk["score"] = result.relevance_score
-                reranked_contexts.append(original_chunk)
-            
-            contexts.extend(reranked_contexts)
-        except Exception as e:
-            print(f"Error during reranking: {e}. Falling back to RRF order.")
-            contexts.extend(raw_general_chunks[:top_k])
-    else:
-        contexts.extend(raw_general_chunks[:top_k])
-    
-    # Final Deduplicate and limit
-    final_contexts = []
-    seen_final = set()
-    for c in contexts:
-        if c["text"] not in seen_final:
-            seen_final.add(c["text"])
-            final_contexts.append(c)
-            
-    final_contexts = final_contexts[:top_k]
+    # 7. Deduplicate and limit to top_k
+    final_contexts = _deduplicate_and_limit(contexts, top_k)
     
     print(f"Found {len(final_contexts)} contexts for {twin_id}")
     
@@ -335,6 +439,7 @@ async def retrieve_context_vectors(query: str, twin_id: str, group_id: Optional[
         c["verified_qna_match"] = False
     
     # Log RAG metrics to Langfuse
+    cohere_client = get_cohere_client()
     if _langfuse_available and final_contexts:
         try:
             langfuse.update_current_observation(

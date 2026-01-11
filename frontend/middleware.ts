@@ -29,9 +29,10 @@ export async function middleware(request: NextRequest) {
     );
 
     // Refresh session if exists
-    const { data: { session } } = await supabase.auth.getSession();
+    const { data: { session }, error: sessionError } = await supabase.auth.getSession();
 
     const isAuthPage = request.nextUrl.pathname.startsWith('/auth');
+    const isCallbackPage = request.nextUrl.pathname === '/auth/callback';
     const isPublicPage = request.nextUrl.pathname === '/' ||
         request.nextUrl.pathname.startsWith('/share/');
     const isDashboard = request.nextUrl.pathname.startsWith('/dashboard');
@@ -44,10 +45,20 @@ export async function middleware(request: NextRequest) {
         return NextResponse.redirect(redirectUrl);
     }
 
-    // If user is logged in and trying to access auth pages
-    if (session && isAuthPage) {
-        // Check if user needs onboarding (first-time user)
-        // We'll use a cookie to track this, actual check happens on dashboard
+    // If user is logged in and trying to access auth pages (except callback and login)
+    // Callback route must be allowed to complete the OAuth flow
+    // Login page must be allowed even if user has session - errors may need to be displayed
+    // (OAuth errors come as hash fragments which middleware can't detect, so we can't redirect based on them)
+    // IMPORTANT: Don't redirect if there's an error in query params (from callback route)
+    const hasErrorParam = request.nextUrl.searchParams.has('error');
+    const isLoginPage = request.nextUrl.pathname === '/auth/login';
+    if (session && isAuthPage && !isCallbackPage && !isLoginPage && !hasErrorParam) {
+        // Only redirect to dashboard - don't follow redirect param to prevent loops
+        return NextResponse.redirect(new URL('/dashboard', request.url));
+    }
+
+    // If user is logged in and on landing page, redirect to dashboard
+    if (session && request.nextUrl.pathname === '/') {
         return NextResponse.redirect(new URL('/dashboard', request.url));
     }
 

@@ -6,9 +6,34 @@ import type { NextRequest } from 'next/server';
 export async function GET(request: NextRequest) {
     const requestUrl = new URL(request.url);
     const code = requestUrl.searchParams.get('code');
+    const error = requestUrl.searchParams.get('error');
+    const errorDescription = requestUrl.searchParams.get('error_description');
     const redirect = requestUrl.searchParams.get('redirect') || '/dashboard';
 
-    if (code) {
+    // Handle OAuth errors
+    if (error) {
+        console.error('OAuth error:', error, errorDescription);
+        const loginUrl = new URL('/auth/login', requestUrl.origin);
+        loginUrl.searchParams.set('error', error);
+        if (errorDescription) {
+            loginUrl.searchParams.set('error_description', errorDescription);
+        }
+        if (redirect && redirect !== '/dashboard') {
+            loginUrl.searchParams.set('redirect', redirect);
+        }
+        return NextResponse.redirect(loginUrl);
+    }
+
+    if (!code) {
+        // No code parameter - redirect to login
+        const loginUrl = new URL('/auth/login', requestUrl.origin);
+        if (redirect && redirect !== '/dashboard') {
+            loginUrl.searchParams.set('redirect', redirect);
+        }
+        return NextResponse.redirect(loginUrl);
+    }
+
+    try {
         const cookieStore = await cookies();
 
         const supabase = createServerClient(
@@ -29,9 +54,27 @@ export async function GET(request: NextRequest) {
             }
         );
 
-        await supabase.auth.exchangeCodeForSession(code);
-    }
+        const { data: sessionData, error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
+        
+        if (exchangeError) {
+            console.error('Session exchange error:', exchangeError);
+            const loginUrl = new URL('/auth/login', requestUrl.origin);
+            loginUrl.searchParams.set('error', 'session_exchange_failed');
+            if (redirect && redirect !== '/dashboard') {
+                loginUrl.searchParams.set('redirect', redirect);
+            }
+            return NextResponse.redirect(loginUrl);
+        }
 
-    // Redirect to the dashboard or specified redirect path
-    return NextResponse.redirect(new URL(redirect, requestUrl.origin));
+        // Redirect to the dashboard or specified redirect path
+        return NextResponse.redirect(new URL(redirect, requestUrl.origin));
+    } catch (error) {
+        console.error('Callback error:', error);
+        const loginUrl = new URL('/auth/login', requestUrl.origin);
+        loginUrl.searchParams.set('error', 'callback_error');
+        if (redirect && redirect !== '/dashboard') {
+            loginUrl.searchParams.set('redirect', redirect);
+        }
+        return NextResponse.redirect(loginUrl);
+    }
 }

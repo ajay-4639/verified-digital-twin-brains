@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, Suspense } from 'react';
+import { useState, Suspense, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { getSupabaseClient } from '@/lib/supabase/client';
@@ -10,6 +10,7 @@ function LoginForm() {
     const router = useRouter();
     const searchParams = useSearchParams();
     const redirectTo = searchParams.get('redirect') || '/dashboard';
+    const errorFromUrl = searchParams.get('error');
 
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
@@ -18,7 +19,65 @@ function LoginForm() {
     const [magicLinkSent, setMagicLinkSent] = useState(false);
     const [mode, setMode] = useState<'password' | 'magic'>('password');
 
+    // Show error from URL if present (e.g., from callback)
+    // Also check for hash fragment errors (OAuth errors come as #error=...)
     const supabase = getSupabaseClient();
+    
+    useEffect(() => {
+        // Check hash fragments FIRST (OAuth errors come as hash fragments)
+        if (typeof window !== 'undefined' && window.location.hash) {
+            const hashParams = new URLSearchParams(window.location.hash.substring(1));
+            const hashError = hashParams.get('error');
+            const errorDescription = hashParams.get('error_description');
+            
+            if (hashError) {
+                console.error('OAuth error from hash:', hashError, errorDescription);
+                
+                // Decode error description (it comes URL encoded)
+                const decodedDescription = errorDescription 
+                    ? decodeURIComponent(errorDescription.replace(/\+/g, ' '))
+                    : '';
+                
+                // Map error codes to user-friendly messages
+                const errorMessages: Record<string, string> = {
+                    'server_error': decodedDescription || 'A server error occurred during login.',
+                    'unexpected_failure': decodedDescription || 'An unexpected error occurred. Please try again.',
+                    'access_denied': 'Access was denied. Please try again or use a different account.',
+                    'configuration_error': 'Authentication configuration error. Please contact support.',
+                };
+                
+                const errorMessage = errorMessages[hashError] || decodedDescription || 'Login failed. Please try again.';
+                setError(errorMessage);
+                
+                // Clean up the URL - remove hash fragment
+                const cleanUrl = '/auth/login?' + new URLSearchParams({ redirect: redirectTo }).toString();
+                window.history.replaceState(null, '', cleanUrl);
+                
+                // IMPORTANT: When OAuth fails with database errors, Supabase might still create a session
+                // but the user record creation failed, so the session is invalid. Sign out to clear it.
+                // This prevents redirect loops where middleware sees the session and redirects away.
+                if (hashError === 'server_error' || hashError === 'unexpected_failure') {
+                    supabase.auth.signOut().catch(() => {
+                        // Ignore sign out errors - session might not exist
+                    });
+                }
+                return;
+            }
+        }
+
+        // Check query params (from callback route redirects)
+        if (errorFromUrl) {
+            const errorMessages: Record<string, string> = {
+                'session_exchange_failed': 'Failed to complete login. Please try again.',
+                'callback_error': 'An error occurred during login. Please try again.',
+                'server_error': 'A server error occurred. Please try again.',
+                'unexpected_failure': 'An unexpected error occurred. Please try again.',
+            };
+            setError(errorMessages[errorFromUrl] || 'Login failed. Please try again.');
+            // Clear the error from URL after displaying
+            router.replace('/auth/login?' + new URLSearchParams({ redirect: redirectTo }).toString(), { scroll: false });
+        }
+    }, [errorFromUrl, redirectTo, router, supabase]);
 
     const handlePasswordLogin = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -64,7 +123,7 @@ function LoginForm() {
         const { error } = await supabase.auth.signInWithOAuth({
             provider: 'google',
             options: {
-                redirectTo: `${window.location.origin}/auth/callback?redirect=${redirectTo}`,
+                redirectTo: `${window.location.origin}/auth/callback?redirect=${encodeURIComponent(redirectTo)}`,
             },
         });
         if (error) {

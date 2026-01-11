@@ -2,9 +2,10 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { useSpecialization } from '../contexts/SpecializationContext';
 import { TwinSelector } from './ui/TwinSelector';
+import { createClient } from '@/lib/supabase/client';
 
 // --- Icons ---
 function getIcon(name: string) {
@@ -54,11 +55,27 @@ const defaultNavSections = [
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
   const [collapsed, setCollapsed] = useState(false);
   const { config, loading } = useSpecialization();
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
 
   // Active twin state
   const [activeTwinId, setActiveTwinId] = useState<string | null>(null);
+
+  // Logout handler
+  const handleLogout = async () => {
+    setIsLoggingOut(true);
+    try {
+      const supabase = createClient();
+      await supabase.auth.signOut();
+      router.push('/');
+    } catch (error) {
+      console.error('Logout error:', error);
+    } finally {
+      setIsLoggingOut(false);
+    }
+  };
 
   // Load active twin from localStorage on mount
   useEffect(() => {
@@ -166,6 +183,17 @@ export default function Sidebar() {
               <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
               <span className="text-[11px] font-medium text-slate-500">{config?.name || 'Initializing'}</span>
             </div>
+            {/* Logout Button */}
+            <button
+              onClick={handleLogout}
+              disabled={isLoggingOut}
+              className="mt-3 w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-sm font-medium bg-slate-700/50 text-slate-300 hover:bg-red-600/20 hover:text-red-400 border border-slate-600/50 hover:border-red-500/30 transition-all duration-200"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+              </svg>
+              {isLoggingOut ? 'Signing out...' : 'Sign Out'}
+            </button>
           </div>
         </div>
       )}

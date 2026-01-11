@@ -54,10 +54,15 @@ export default function SignupPage() {
 
     const handleGoogleSignup = async () => {
         setLoading(true);
+        // Get redirect from URL if present (for consistency with login)
+        const redirectParam = typeof window !== 'undefined' 
+            ? new URLSearchParams(window.location.search).get('redirect') || '/dashboard'
+            : '/dashboard';
+        
         const { error } = await supabase.auth.signInWithOAuth({
             provider: 'google',
             options: {
-                redirectTo: `${window.location.origin}/auth/callback`,
+                redirectTo: `${window.location.origin}/auth/callback?redirect=${encodeURIComponent(redirectParam)}`,
             },
         });
         if (error) {

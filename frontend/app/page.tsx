@@ -1,7 +1,41 @@
+'use client';
+
 import Link from "next/link";
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { getSupabaseClient } from '@/lib/supabase/client';
+import type { User, Session } from '@supabase/supabase-js';
 
 // Premium Landing Page - Dark Theme with Animations
 export default function Home() {
+  const router = useRouter();
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const supabase = getSupabaseClient();
+    
+    // Check current session
+    supabase.auth.getSession().then(({ data: { session } }: { data: { session: Session | null } }) => {
+      setUser(session?.user || null);
+      setLoading(false);
+    });
+
+    // Listen for auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event: string, session: Session | null) => {
+      setUser(session?.user || null);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const handleLogout = async () => {
+    const supabase = getSupabaseClient();
+    await supabase.auth.signOut();
+    setUser(null);
+    router.refresh();
+  };
+
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-white font-sans">
       {/* Animated Background */}
@@ -28,13 +62,48 @@ export default function Home() {
           <a href="#features" className="text-sm text-slate-400 hover:text-white transition-colors">Features</a>
           <a href="#how-it-works" className="text-sm text-slate-400 hover:text-white transition-colors">How It Works</a>
           <a href="#pricing" className="text-sm text-slate-400 hover:text-white transition-colors">Pricing</a>
-          <Link href="/auth/login" className="text-sm text-slate-400 hover:text-white transition-colors">Sign In</Link>
-          <Link
-            href="/onboarding"
-            className="px-5 py-2.5 bg-white text-black text-sm font-semibold rounded-full hover:bg-slate-200 transition-all hover:scale-105"
-          >
-            Get Started Free
-          </Link>
+          
+          {loading ? (
+            <div className="w-8 h-8 rounded-full bg-slate-700 animate-pulse" />
+          ) : user ? (
+            <div className="flex items-center gap-4">
+              <Link 
+                href="/dashboard"
+                className="text-sm text-slate-400 hover:text-white transition-colors"
+              >
+                Dashboard
+              </Link>
+              <div className="flex items-center gap-3 px-3 py-1.5 bg-white/5 rounded-full border border-white/10">
+                {/* User Avatar */}
+                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white text-sm font-bold">
+                  {user.email?.charAt(0).toUpperCase() || user.user_metadata?.full_name?.charAt(0) || 'U'}
+                </div>
+                {/* User Email */}
+                <span className="text-sm text-slate-300 max-w-[150px] truncate">
+                  {user.email || user.user_metadata?.full_name || 'User'}
+                </span>
+                <button
+                  onClick={handleLogout}
+                  className="text-xs text-slate-400 hover:text-white transition-colors ml-2"
+                  title="Sign Out"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <Link href="/auth/login" className="text-sm text-slate-400 hover:text-white transition-colors">Sign In</Link>
+              <Link
+                href="/auth/login?redirect=/onboarding"
+                className="px-5 py-2.5 bg-white text-black text-sm font-semibold rounded-full hover:bg-slate-200 transition-all hover:scale-105"
+              >
+                Get Started Free
+              </Link>
+            </>
+          )}
         </div>
 
         {/* Mobile Menu Button */}
@@ -69,15 +138,27 @@ export default function Home() {
 
         {/* CTAs */}
         <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-16">
-          <Link
-            href="/onboarding"
-            className="group px-8 py-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-bold text-lg rounded-2xl shadow-2xl shadow-indigo-500/30 hover:shadow-indigo-500/50 transition-all hover:scale-105 flex items-center gap-2"
-          >
-            Start Building Free
-            <svg className="w-5 h-5 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 8l4 4m0 0l-4 4m4-4H3" />
-            </svg>
-          </Link>
+          {user ? (
+            <Link
+              href="/dashboard"
+              className="group px-8 py-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-bold text-lg rounded-2xl shadow-2xl shadow-indigo-500/30 hover:shadow-indigo-500/50 transition-all hover:scale-105 flex items-center gap-2"
+            >
+              Go to Dashboard
+              <svg className="w-5 h-5 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 8l4 4m0 0l-4 4m4-4H3" />
+              </svg>
+            </Link>
+          ) : (
+            <Link
+              href="/auth/login?redirect=/onboarding"
+              className="group px-8 py-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-bold text-lg rounded-2xl shadow-2xl shadow-indigo-500/30 hover:shadow-indigo-500/50 transition-all hover:scale-105 flex items-center gap-2"
+            >
+              Start Building Free
+              <svg className="w-5 h-5 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 8l4 4m0 0l-4 4m4-4H3" />
+              </svg>
+            </Link>
+          )}
           <a
             href="#how-it-works"
             className="px-8 py-4 text-slate-300 font-semibold text-lg hover:text-white transition-colors flex items-center gap-2"
@@ -342,13 +423,13 @@ export default function Home() {
                   ))}
                 </ul>
                 <Link
-                  href="/onboarding"
+                  href={user ? "/dashboard" : "/auth/login?redirect=/onboarding"}
                   className={`block w-full py-3 text-center font-semibold rounded-xl transition-all ${plan.featured
                       ? 'bg-white text-black hover:bg-slate-200'
                       : 'bg-white/10 text-white hover:bg-white/20'
                     }`}
                 >
-                  {plan.cta}
+                  {user ? "Go to Dashboard" : plan.cta}
                 </Link>
               </div>
             ))}
@@ -366,15 +447,27 @@ export default function Home() {
             <p className="text-xl text-slate-400 mb-8">
               Join thousands of experts who scale their knowledge with AI
             </p>
-            <Link
-              href="/onboarding"
-              className="inline-flex items-center gap-2 px-8 py-4 bg-white text-black font-bold text-lg rounded-2xl hover:bg-slate-200 transition-all hover:scale-105"
-            >
-              Get Started Free
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 8l4 4m0 0l-4 4m4-4H3" />
-              </svg>
-            </Link>
+            {user ? (
+              <Link
+                href="/dashboard"
+                className="inline-flex items-center gap-2 px-8 py-4 bg-white text-black font-bold text-lg rounded-2xl hover:bg-slate-200 transition-all hover:scale-105"
+              >
+                Go to Dashboard
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 8l4 4m0 0l-4 4m4-4H3" />
+                </svg>
+              </Link>
+            ) : (
+              <Link
+                href="/auth/login?redirect=/onboarding"
+                className="inline-flex items-center gap-2 px-8 py-4 bg-white text-black font-bold text-lg rounded-2xl hover:bg-slate-200 transition-all hover:scale-105"
+              >
+                Get Started Free
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 8l4 4m0 0l-4 4m4-4H3" />
+                </svg>
+              </Link>
+            )}
             <p className="text-sm text-slate-500 mt-4">No credit card required</p>
           </div>
         </div>

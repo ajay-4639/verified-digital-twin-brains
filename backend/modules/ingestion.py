@@ -211,10 +211,14 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
                 continue
 
         if not text:
-            if last_error and ("Sign in" in last_error or "bot" in last_error.lower() or "HTTP Error 403" in last_error):
+            if last_error and ("Sign in" in last_error or "bot" in last_error.lower() or "HTTP Error 403" in last_error or "403" in last_error):
                 raise ValueError(
-                    "YouTube blocked the connection. Provide cookies via YOUTUBE_COOKIES_FILE or YOUTUBE_COOKIES_BROWSER, "
-                    "optionally set YOUTUBE_PROXY, or try a video with public captions."
+                    "YouTube blocked the connection (HTTP 403). This video requires authentication. "
+                    "Options: "
+                    "(1) Try a video with public closed captions (look for 'CC' badge), "
+                    "(2) Set YOUTUBE_COOKIES_BROWSER=firefox in your environment, "
+                    "(3) Set YOUTUBE_PROXY to use a proxy service, "
+                    "(4) Try a different video that's publicly accessible."
                 )
             raise ValueError(f"Download failed: {last_error or 'Unknown download error'}")
 

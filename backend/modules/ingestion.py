@@ -4,6 +4,7 @@ import re
 import json
 import feedparser
 import yt_dlp
+import time
 from typing import List, Dict, Optional, Any
 from PyPDF2 import PdfReader
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -39,6 +40,57 @@ def extract_video_id(url: str) -> str:
 
 
 from modules.transcription import transcribe_audio_multi
+
+
+def _build_yt_dlp_opts(video_id: str, source_id: str, twin_id: str) -> dict:
+    """
+    Build yt-dlp options with enterprise-grade toggles:
+    - Android client emulation (bypasses web gating)
+    - Optional cookies (file or browser) for age/region-gated videos
+    - Optional proxy for IP reputation routing
+    """
+    temp_dir = "temp_uploads"
+    os.makedirs(temp_dir, exist_ok=True)
+    temp_filename = f"yt_{video_id}"
+
+    cookie_file = os.getenv("YOUTUBE_COOKIES_FILE")
+    cookie_browser = os.getenv("YOUTUBE_COOKIES_BROWSER")
+    proxy_url = os.getenv("YOUTUBE_PROXY")
+
+    ydl_opts = {
+        'format': 'm4a/bestaudio/best',
+        'outtmpl': os.path.join(temp_dir, f"{temp_filename}.%(ext)s"),
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'quiet': True,
+        'no_warnings': True,
+        # Emulate Android client to bypass bot checks
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android'],
+                'player_skip': ['webpage', 'configs', 'js'],
+                'include_live_dash': [True]
+            }
+        },
+        'nocheckcertificate': True,
+    }
+
+    if proxy_url:
+        ydl_opts['proxy'] = proxy_url
+        log_ingestion_event(source_id, twin_id, "info", "Using YOUTUBE_PROXY for YouTube download")
+
+    if cookie_file and os.path.exists(cookie_file):
+        ydl_opts['cookiefile'] = cookie_file
+        log_ingestion_event(source_id, twin_id, "info", "Using YOUTUBE_COOKIES_FILE for YouTube download")
+    elif cookie_browser:
+        # (browser, profile, keyring, container)
+        ydl_opts['cookiesfrombrowser'] = (cookie_browser, None, None, None)
+        log_ingestion_event(source_id, twin_id, "info", f"Using cookies from browser={cookie_browser} for YouTube download")
+
+    return ydl_opts, temp_dir, temp_filename
 
 
 async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
@@ -131,68 +183,40 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
         print("[YouTube] No captions found. Starting robust audio download...")
         log_ingestion_event(source_id, twin_id, "warning", "Attempting robust audio download (Client Emulation)")
 
-        try:
-            temp_dir = "temp_uploads"
-            os.makedirs(temp_dir, exist_ok=True)
-            temp_filename = f"yt_{video_id}"
+        ydl_opts, temp_dir, temp_filename = _build_yt_dlp_opts(video_id, source_id, twin_id)
 
-            cookie_file = os.getenv("YOUTUBE_COOKIES_FILE")
-            cookie_browser = os.getenv("YOUTUBE_COOKIES_BROWSER")
+        # Up to 2 retries for transient network/IP reputation issues
+        attempts = 0
+        last_error = None
+        while attempts < 3 and not text:
+            attempts += 1
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
 
-            # CRITICAL: Use 'android' client to bypass web-based IP blocking
-            ydl_opts = {
-                'format': 'm4a/bestaudio/best',
-                'outtmpl': os.path.join(temp_dir, f"{temp_filename}.%(ext)s"),
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
-                'quiet': True,
-                'no_warnings': True,
-                # KEY FIX: Emulate Android client to bypass bot checks
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['android'],
-                        'player_skip': ['webpage', 'configs', 'js'],
-                        'include_live_dash': [True] 
-                    }
-                },
-                'nocheckcertificate': True,
-            }
+                audio_path = os.path.join(temp_dir, f"{temp_filename}.mp3")
 
-            # Allow authenticated fetch when YouTube demands sign-in
-            if cookie_file and os.path.exists(cookie_file):
-                ydl_opts['cookiefile'] = cookie_file
-                log_ingestion_event(source_id, twin_id, "info", "Using YOUTUBE_COOKIES_FILE for YouTube download")
-            elif cookie_browser:
-                # (browser, profile, keyring, container)
-                ydl_opts['cookiesfrombrowser'] = (cookie_browser, None, None, None)
-                log_ingestion_event(source_id, twin_id, "info", f"Using cookies from browser={cookie_browser} for YouTube download")
+                # Transcribe
+                text = transcribe_audio_multi(audio_path)
+                log_ingestion_event(source_id, twin_id, "info", "Audio transcribed via Gemini/Whisper")
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
+                # Cleanup
+                if os.path.exists(audio_path):
+                    os.remove(audio_path)
+            except Exception as download_error:
+                last_error = str(download_error)
+                print(f"[YouTube] Robust download failed (attempt {attempts}): {last_error}")
+                if attempts < 3:
+                    time.sleep(1.5 * attempts)
+                continue
 
-            audio_path = os.path.join(temp_dir, f"{temp_filename}.mp3")
-
-            # Transcribe
-            text = transcribe_audio_multi(audio_path)
-            log_ingestion_event(source_id, twin_id, "info", "Audio transcribed via Gemini/Whisper")
-
-            # Cleanup
-            if os.path.exists(audio_path):
-                os.remove(audio_path)
-
-        except Exception as download_error:
-            error_str = str(download_error)
-            print(f"[YouTube] Robust download failed: {error_str}")
-
-            if "Sign in" in error_str or "bot" in error_str.lower():
+        if not text:
+            if last_error and ("Sign in" in last_error or "bot" in last_error.lower() or "HTTP Error 403" in last_error):
                 raise ValueError(
                     "YouTube blocked the connection. Provide cookies via YOUTUBE_COOKIES_FILE or YOUTUBE_COOKIES_BROWSER, "
-                    "or try a video with public captions."
+                    "optionally set YOUTUBE_PROXY, or try a video with public captions."
                 )
-            raise ValueError(f"Download failed: {download_error}")
+            raise ValueError(f"Download failed: {last_error or 'Unknown download error'}")
 
     if not text:
         raise ValueError(
@@ -683,6 +707,13 @@ async def ingest_podcast_transcript(twin_id: str, url: str) -> str:
     """Wrapper that creates source_id and calls ingest_podcast_rss"""
     source_id = str(uuid.uuid4())
     await ingest_podcast_rss(source_id, twin_id, url)
+    return source_id
+
+
+async def ingest_x_thread_wrapper(twin_id: str, url: str) -> str:
+    """Wrapper that creates source_id and calls ingest_x_thread"""
+    source_id = str(uuid.uuid4())
+    await ingest_x_thread(source_id, twin_id, url)
     return source_id
 
 

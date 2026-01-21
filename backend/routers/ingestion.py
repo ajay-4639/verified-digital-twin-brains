@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
 from modules.auth_guard import verify_owner, get_current_user, verify_twin_ownership, verify_source_ownership
-from modules.ingestion import ingest_youtube_transcript_wrapper, ingest_podcast_transcript, ingest_file, ingest_url
+from modules.ingestion import ingest_youtube_transcript_wrapper, ingest_podcast_transcript, ingest_x_thread_wrapper, ingest_file, ingest_url
 from modules.observability import supabase
 from modules.training_jobs import get_training_job, process_training_queue
 from pydantic import BaseModel
@@ -14,6 +14,9 @@ class YouTubeIngestRequest(BaseModel):
     url: str
 
 class PodcastIngestRequest(BaseModel):
+    url: str
+
+class XThreadIngestRequest(BaseModel):
     url: str
 
 class URLIngestRequest(BaseModel):
@@ -31,6 +34,14 @@ async def ingest_youtube(twin_id: str, request: YouTubeIngestRequest, user=Depen
 async def ingest_podcast(twin_id: str, request: PodcastIngestRequest, user=Depends(verify_owner)):
     try:
         source_id = await ingest_podcast_transcript(twin_id, request.url)
+        return {"source_id": source_id, "status": "processing"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/ingest/x/{twin_id}")
+async def ingest_x(twin_id: str, request: XThreadIngestRequest, user=Depends(verify_owner)):
+    try:
+        source_id = await ingest_x_thread_wrapper(twin_id, request.url)
         return {"source_id": source_id, "status": "processing"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

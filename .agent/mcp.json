@@ -1,15 +1,30 @@
 {
-    "mcpServers": {
-        "supabase": {
-            "command": "npx",
-            "args": [
-                "-y",
-                "@supabase/mcp-server-supabase@latest"
-            ],
-            "env": {
-                "SUPABASE_URL": "https://jvtffdbuwyhmcynauety.supabase.co",
-                "SUPABASE_SERVICE_ROLE_KEY": "sb_secret_N2McacLzfKHALYLAgg01Xw_uEvGllKO"
-            }
-        }
+  "mcpServers": {
+    "supabase": {
+      "command": "npx",
+      "args": ["-y", "@supabase/mcp-server-supabase@latest"],
+      "env": {
+        "SUPABASE_URL": "https://jvtffdbuwyhmcynauety.supabase.co",
+        "SUPABASE_SERVICE_ROLE_KEY": "sb_secret_N2McacLzfKHALYLAgg01Xw_uEvGllKO"
+      }
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-fs@latest"],
+      "env": {
+        "ALLOWED_DIRECTORIES": "d:/verified-digital-twin-brains"
+      }
+    },
+    "git": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-git@latest", "d:/verified-digital-twin-brains"]
+    },
+    "grep": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-grep@latest"],
+      "env": {
+        "SEARCH_ROOT": "d:/verified-digital-twin-brains"
+      }
     }
+  }
 }

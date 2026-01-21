@@ -136,6 +136,9 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
             os.makedirs(temp_dir, exist_ok=True)
             temp_filename = f"yt_{video_id}"
 
+            cookie_file = os.getenv("YOUTUBE_COOKIES_FILE")
+            cookie_browser = os.getenv("YOUTUBE_COOKIES_BROWSER")
+
             # CRITICAL: Use 'android' client to bypass web-based IP blocking
             ydl_opts = {
                 'format': 'm4a/bestaudio/best',
@@ -158,6 +161,15 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
                 'nocheckcertificate': True,
             }
 
+            # Allow authenticated fetch when YouTube demands sign-in
+            if cookie_file and os.path.exists(cookie_file):
+                ydl_opts['cookiefile'] = cookie_file
+                log_ingestion_event(source_id, twin_id, "info", "Using YOUTUBE_COOKIES_FILE for YouTube download")
+            elif cookie_browser:
+                # (browser, profile, keyring, container)
+                ydl_opts['cookiesfrombrowser'] = (cookie_browser, None, None, None)
+                log_ingestion_event(source_id, twin_id, "info", f"Using cookies from browser={cookie_browser} for YouTube download")
+
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
 
@@ -177,7 +189,8 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
 
             if "Sign in" in error_str or "bot" in error_str.lower():
                 raise ValueError(
-                    "YouTube blocked the connection. Try a video with captions."
+                    "YouTube blocked the connection. Provide cookies via YOUTUBE_COOKIES_FILE or YOUTUBE_COOKIES_BROWSER, "
+                    "or try a video with public captions."
                 )
             raise ValueError(f"Download failed: {download_error}")
 

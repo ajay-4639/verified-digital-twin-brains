@@ -8,7 +8,7 @@ import time
 import httpx
 import html
 import html as html_lib
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 from PyPDF2 import PdfReader
 from youtube_transcript_api import YouTubeTranscriptApi
 from modules.clients import get_openai_client, get_pinecone_index
@@ -16,6 +16,132 @@ from modules.observability import supabase, log_ingestion_event
 from modules.health_checks import run_all_health_checks, calculate_content_hash
 from modules.training_jobs import create_training_job
 from modules.governance import AuditLogger
+
+
+# ============================================================================
+# Enterprise Configuration & Utilities
+# ============================================================================
+
+class YouTubeConfig:
+    """Enterprise-grade YouTube ingestion configuration."""
+    MAX_RETRIES = int(os.getenv("YOUTUBE_MAX_RETRIES", "5"))
+    ASR_MODEL = os.getenv("YOUTUBE_ASR_MODEL", "whisper-large-v3")
+    ASR_PROVIDER = os.getenv("YOUTUBE_ASR_PROVIDER", "openai")
+    LANGUAGE_DETECTION = os.getenv("YOUTUBE_LANGUAGE_DETECTION", "true").lower() == "true"
+    PII_SCRUB = os.getenv("YOUTUBE_PII_SCRUB", "true").lower() == "true"
+    VERBOSE_LOGGING = os.getenv("YOUTUBE_VERBOSE_LOGGING", "false").lower() == "true"
+    COOKIES_FILE = os.getenv("YOUTUBE_COOKIES_FILE")
+    PROXY = os.getenv("YOUTUBE_PROXY")
+
+
+class ErrorClassifier:
+    """Classify YouTube/yt-dlp errors for better handling and telemetry."""
+    
+    @staticmethod
+    def classify(error_msg: str) -> Tuple[str, str, bool]:
+        """
+        Classify error and return (category, user_message, is_retryable).
+        
+        Categories:
+        - auth: Authentication/login required
+        - rate_limit: HTTP 429, quota exceeded
+        - gating: Age/region/access restrictions
+        - unavailable: Video deleted/private
+        - network: Connection/timeout issues
+        - unknown: Unclassified
+        """
+        error_lower = error_msg.lower()
+        
+        # Rate limiting
+        if "429" in error_msg or "rate" in error_lower or "quota" in error_lower:
+            return "rate_limit", "YouTube rate limit reached. Retrying with backoff...", True
+        
+        # Authentication required
+        if "403" in error_msg or "sign in" in error_lower or "unauthorized" in error_lower:
+            return "auth", "This video requires authentication or is age-restricted.", False
+        
+        # Gating (region, age, etc.)
+        if "geo" in error_lower or "region" in error_lower or "not available" in error_lower:
+            return "gating", "This video is not available in your region.", False
+        
+        # Video unavailable
+        if "unavailable" in error_lower or "deleted" in error_lower or "not found" in error_lower:
+            return "unavailable", "This video is unavailable (deleted, private, or not found).", False
+        
+        # Network issues
+        if "timeout" in error_lower or "connection" in error_lower or "socket" in error_lower:
+            return "network", "Network connection issue. Retrying...", True
+        
+        return "unknown", f"Unexpected error: {error_msg}", False
+
+
+class LanguageDetector:
+    """Lightweight language detection for transcripts."""
+    
+    # Simple heuristics for common languages (word counts and patterns)
+    LANGUAGE_PATTERNS = {
+        "en": [r"\b(the|and|a|to|of|in|is|that|it)\b"],
+        "es": [r"\b(el|la|de|que|y|a|en|un|es)\b"],
+        "fr": [r"\b(le|la|de|et|a|en|un|est|c'est)\b"],
+        "de": [r"\b(der|die|und|in|den|von|zu|das)\b"],
+        "ja": [r"[ぁ-ん]|[ァ-ヴー]|[一-龥]"],
+        "zh": [r"[\u4e00-\u9fff]"],
+    }
+    
+    @staticmethod
+    def detect(text: str) -> str:
+        """Detect language of text. Returns language code (e.g., 'en', 'es')."""
+        if not text or len(text) < 10:
+            return "en"  # Default
+        
+        text_lower = text.lower()
+        scores = {}
+        
+        for lang, patterns in LanguageDetector.LANGUAGE_PATTERNS.items():
+            count = 0
+            for pattern in patterns:
+                count += len(re.findall(pattern, text_lower))
+            scores[lang] = count
+        
+        if scores:
+            return max(scores, key=scores.get)
+        return "en"
+
+
+class PIIScrubber:
+    """Lightweight PII detection and redaction."""
+    
+    # Regex patterns for common PII (very permissive, for flagging)
+    PATTERNS = {
+        "email": r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+        "phone": r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b",
+        "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
+        "credit_card": r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b",
+        "ip_address": r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+    }
+    
+    @staticmethod
+    def detect_pii(text: str) -> Dict[str, List[str]]:
+        """Detect PII in text. Returns dict of pii_type -> [matches]."""
+        detected = {}
+        for pii_type, pattern in PIIScrubber.PATTERNS.items():
+            matches = re.findall(pattern, text)
+            if matches:
+                detected[pii_type] = matches
+        return detected
+    
+    @staticmethod
+    def has_pii(text: str) -> bool:
+        """Check if text contains any PII."""
+        return bool(PIIScrubber.detect_pii(text))
+    
+    @staticmethod
+    def scrub(text: str) -> str:
+        """Redact PII from text."""
+        for pii_type, pattern in PIIScrubber.PATTERNS.items():
+            placeholder = f"[{pii_type.upper()}]"
+            text = re.sub(pattern, placeholder, text)
+        return text
 
 
 def extract_text_from_pdf(file_path: str) -> str:
@@ -104,7 +230,14 @@ def _build_yt_dlp_opts(video_id: str, source_id: str, twin_id: str) -> dict:
         ydl_opts['cookiefile'] = cookie_file
         log_ingestion_event(source_id, twin_id, "info", "Using YOUTUBE_COOKIES_FILE for YouTube download")
     else:
-        log_ingestion_event(source_id, twin_id, "info", "No cookie file found; using client emulation only")
+        if YouTubeConfig.VERBOSE_LOGGING:
+            log_ingestion_event(source_id, twin_id, "info", "No cookie file found; using client emulation only")
+
+    # Log configuration for telemetry
+    log_ingestion_event(source_id, twin_id, "info", 
+        f"YouTube config: ASR={YouTubeConfig.ASR_PROVIDER}:{YouTubeConfig.ASR_MODEL}, "
+        f"MaxRetries={YouTubeConfig.MAX_RETRIES}, LanguageDetection={YouTubeConfig.LANGUAGE_DETECTION}, "
+        f"PIIScrub={YouTubeConfig.PII_SCRUB}")
 
     return ydl_opts, temp_dir, temp_filename
 

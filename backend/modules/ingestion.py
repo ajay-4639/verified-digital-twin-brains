@@ -202,6 +202,74 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
              print(f"[YouTube] List transcripts failed: {e}")
 
     # -------------------------------------------------------------
+    # Strategy 1.6: Direct HTTP fetch with browser headers (bypasses library blocks)
+    # -------------------------------------------------------------
+    if not text:
+        try:
+            import httpx
+            import re
+            import json
+            
+            print(f"[YouTube] Trying direct HTTP transcript fetch for {video_id}")
+            log_ingestion_event(source_id, twin_id, "info", "Attempting direct HTTP transcript fetch")
+            
+            # Use Chrome-like headers to appear as a real browser
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+            }
+            
+            # Fetch the video page
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            async with httpx.AsyncClient(timeout=30, headers=headers, follow_redirects=True) as client:
+                response = await client.get(video_url)
+                
+                if response.status_code == 200:
+                    page_content = response.text
+                    
+                    # Extract caption track URLs from the page
+                    caption_match = re.search(r'"captionTracks":\s*(\[.*?\])', page_content)
+                    if caption_match:
+                        try:
+                            caption_tracks = json.loads(caption_match.group(1))
+                            
+                            # Find English or first available caption
+                            caption_url = None
+                            for track in caption_tracks:
+                                lang = track.get("languageCode", "")
+                                if lang.startswith("en"):
+                                    caption_url = track.get("baseUrl")
+                                    break
+                            
+                            # Fallback to first track if no English
+                            if not caption_url and caption_tracks:
+                                caption_url = caption_tracks[0].get("baseUrl")
+                            
+                            if caption_url:
+                                # Fetch the actual captions
+                                caption_response = await client.get(caption_url)
+                                if caption_response.status_code == 200:
+                                    # Parse XML captions
+                                    caption_xml = caption_response.text
+                                    caption_texts = re.findall(r'<text[^>]*>(.*?)</text>', caption_xml, re.DOTALL)
+                                    
+                                    if caption_texts:
+                                        # Unescape HTML entities and join
+                                        import html
+                                        text = " ".join([html.unescape(t.strip()) for t in caption_texts])
+                                        text = re.sub(r'\s+', ' ', text).strip()
+                                        log_ingestion_event(source_id, twin_id, "info", f"Direct HTTP transcript fetch successful ({len(text)} chars)")
+                                        print(f"[YouTube] Direct HTTP fetch succeeded: {len(text)} characters")
+                        except json.JSONDecodeError:
+                            print(f"[YouTube] Could not parse caption tracks JSON")
+        except Exception as e:
+            print(f"[YouTube] Direct HTTP fetch failed: {e}")
+
+    # -------------------------------------------------------------
     # Strategy 2: yt-dlp with Multiple Client Emulation & Better Error Handling
     # -------------------------------------------------------------
     if not text:

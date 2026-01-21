@@ -45,18 +45,19 @@ from modules.transcription import transcribe_audio_multi
 def _build_yt_dlp_opts(video_id: str, source_id: str, twin_id: str) -> dict:
     """
     Build yt-dlp options with enterprise-grade toggles:
-    - Android client emulation (bypasses web gating)
-    - Optional cookies (file or browser) for age/region-gated videos
+    - Multiple client emulation strategies (Android, web, iOS)
+    - Optional cookies (file only) for age/region-gated videos
     - Optional proxy for IP reputation routing
+    - Browser headers to avoid bot detection
     """
     temp_dir = "temp_uploads"
     os.makedirs(temp_dir, exist_ok=True)
     temp_filename = f"yt_{video_id}"
 
     cookie_file = os.getenv("YOUTUBE_COOKIES_FILE")
-    cookie_browser = os.getenv("YOUTUBE_COOKIES_BROWSER")
     proxy_url = os.getenv("YOUTUBE_PROXY")
 
+    # Start with Android client emulation (most reliable for containers)
     ydl_opts = {
         'format': 'm4a/bestaudio/best',
         'outtmpl': os.path.join(temp_dir, f"{temp_filename}.%(ext)s"),
@@ -67,28 +68,40 @@ def _build_yt_dlp_opts(video_id: str, source_id: str, twin_id: str) -> dict:
         }],
         'quiet': True,
         'no_warnings': True,
-        # Emulate Android client to bypass bot checks
+        # Multiple client strategies (try Android first, then web)
         'extractor_args': {
             'youtube': {
-                'player_client': ['android'],
+                'player_client': ['android', 'web', 'ios'],  # Try multiple clients
                 'player_skip': ['webpage', 'configs', 'js'],
                 'include_live_dash': [True]
             }
         },
         'nocheckcertificate': True,
+        'socket_timeout': 30,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        },
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web'],
+            }
+        },
+        'retries': 5,
+        'fragment_retries': 5,
+        'skip_unavailable_fragments': True,
     }
 
     if proxy_url:
         ydl_opts['proxy'] = proxy_url
         log_ingestion_event(source_id, twin_id, "info", "Using YOUTUBE_PROXY for YouTube download")
 
+    # Only use file-based cookies (cookiesfrombrowser doesn't work in containers)
     if cookie_file and os.path.exists(cookie_file):
         ydl_opts['cookiefile'] = cookie_file
         log_ingestion_event(source_id, twin_id, "info", "Using YOUTUBE_COOKIES_FILE for YouTube download")
-    elif cookie_browser:
-        # (browser, profile, keyring, container)
-        ydl_opts['cookiesfrombrowser'] = (cookie_browser, None, None, None)
-        log_ingestion_event(source_id, twin_id, "info", f"Using cookies from browser={cookie_browser} for YouTube download")
+    else:
+        log_ingestion_event(source_id, twin_id, "info", "No cookie file found; using client emulation only")
 
     return ydl_opts, temp_dir, temp_filename
 
@@ -159,68 +172,102 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
         transcript_error = str(e)
         print(f"[YouTube] Transcript API failed: {e}")
 
-    # Strategy 1.5: List Transcripts
+    # Strategy 1.5: List Transcripts (all languages)
     if not text:
         try:
             from youtube_transcript_api import YouTubeTranscriptApi as YTA
-            # Note: list_transcripts is a static method
             transcript_list = YTA.list_transcripts(video_id)
-            for transcript in transcript_list:
+            
+            # Try manual transcripts first (usually more complete)
+            for transcript in transcript_list.manually_created_transcripts:
                 try:
                     fetched = transcript.fetch()
                     text = " ".join([item['text'] for item in fetched])
-                    log_ingestion_event(source_id, twin_id, "info", f"Fetched {transcript.language} transcript")
+                    log_ingestion_event(source_id, twin_id, "info", f"Fetched manual {transcript.language} transcript")
                     break
                 except:
                     continue
+            
+            # Then try auto-generated transcripts
+            if not text:
+                for transcript in transcript_list.generated_transcripts:
+                    try:
+                        fetched = transcript.fetch()
+                        text = " ".join([item['text'] for item in fetched])
+                        log_ingestion_event(source_id, twin_id, "info", f"Fetched auto-generated {transcript.language} transcript")
+                        break
+                    except:
+                        continue
         except Exception as e:
              print(f"[YouTube] List transcripts failed: {e}")
 
     # -------------------------------------------------------------
-    # Strategy 2: yt-dlp with Client Emulation (The "Magic" Fix)
+    # Strategy 2: yt-dlp with Multiple Client Emulation & Better Error Handling
     # -------------------------------------------------------------
     if not text:
         print("[YouTube] No captions found. Starting robust audio download...")
-        log_ingestion_event(source_id, twin_id, "warning", "Attempting robust audio download (Client Emulation)")
+        log_ingestion_event(source_id, twin_id, "warning", "Attempting robust audio download (yt-dlp with multiple clients)")
 
         ydl_opts, temp_dir, temp_filename = _build_yt_dlp_opts(video_id, source_id, twin_id)
 
-        # Up to 2 retries for transient network/IP reputation issues
+        # Up to 5 retries with exponential backoff for transient issues
         attempts = 0
         last_error = None
-        while attempts < 3 and not text:
+        while attempts < 5 and not text:
             attempts += 1
             try:
+                print(f"[YouTube] Download attempt {attempts}/5 for {video_id}")
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
 
                 audio_path = os.path.join(temp_dir, f"{temp_filename}.mp3")
+                
+                if not os.path.exists(audio_path):
+                    raise FileNotFoundError(f"Audio file not created at {audio_path}")
 
                 # Transcribe
+                print(f"[YouTube] Transcribing audio for {video_id}")
                 text = transcribe_audio_multi(audio_path)
-                log_ingestion_event(source_id, twin_id, "info", "Audio transcribed via Gemini/Whisper")
+                log_ingestion_event(source_id, twin_id, "info", f"Audio transcribed via Gemini/Whisper ({len(text)} chars)")
 
                 # Cleanup
                 if os.path.exists(audio_path):
                     os.remove(audio_path)
+                    
+                print(f"[YouTube] Successfully transcribed {video_id}: {len(text)} characters")
+                
             except Exception as download_error:
                 last_error = str(download_error)
-                print(f"[YouTube] Robust download failed (attempt {attempts}): {last_error}")
-                if attempts < 3:
-                    time.sleep(1.5 * attempts)
+                print(f"[YouTube] Attempt {attempts} failed: {last_error}")
+                log_ingestion_event(source_id, twin_id, "warning", f"Download attempt {attempts} failed: {last_error}")
+                
+                if attempts < 5:
+                    # Exponential backoff: 2, 4, 8, 16 seconds
+                    backoff = 2 ** attempts
+                    print(f"[YouTube] Waiting {backoff}s before retry...")
+                    time.sleep(backoff)
                 continue
 
         if not text:
-            if last_error and ("Sign in" in last_error or "bot" in last_error.lower() or "HTTP Error 403" in last_error or "403" in last_error):
+            # Parse error to provide helpful guidance
+            error_msg = last_error or "Unknown download error"
+            
+            if "403" in error_msg or "Sign in" in error_msg or "bot" in error_msg.lower():
                 raise ValueError(
-                    "YouTube blocked the connection (HTTP 403). This video requires authentication. "
-                    "Options: "
-                    "(1) Try a video with public closed captions (look for 'CC' badge), "
-                    "(2) Set YOUTUBE_COOKIES_BROWSER=firefox in your environment, "
-                    "(3) Set YOUTUBE_PROXY to use a proxy service, "
-                    "(4) Try a different video that's publicly accessible."
+                    "YouTube blocked the connection (HTTP 403). This can happen if: "
+                    "(1) The video doesn't have public captions (look for CC badge on videos like TED-Ed or Khan Academy), "
+                    "(2) YouTube is rate-limiting your IP address, "
+                    "(3) The video requires authentication or is region-restricted. "
+                    "Solutions: Try a public educational video with captions, or set YOUTUBE_PROXY to route through a proxy service."
                 )
-            raise ValueError(f"Download failed: {last_error or 'Unknown download error'}")
+            elif "unavailable" in error_msg.lower():
+                raise ValueError(
+                    "This video is unavailable. It may be: "
+                    "(1) Deleted, (2) Private, (3) Age-restricted, or (4) Region-restricted. "
+                    "Please try a different public video."
+                )
+            else:
+                raise ValueError(f"Download failed: {error_msg}")
 
     if not text:
         raise ValueError(

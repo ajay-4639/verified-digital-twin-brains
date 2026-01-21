@@ -53,7 +53,7 @@ class ErrorClassifier:
         error_lower = error_msg.lower()
         
         # Rate limiting
-        if "429" in error_msg or "rate" in error_lower or "quota" in error_lower:
+        if "429" in error_msg or "rate" in error_lower or "quota" in error_lower or "too many requests" in error_lower:
             return "rate_limit", "YouTube rate limit reached. Retrying with backoff...", True
         
         # Authentication required
@@ -114,7 +114,7 @@ class PIIScrubber:
     # Regex patterns for common PII (very permissive, for flagging)
     PATTERNS = {
         "email": r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
-        "phone": r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b",
+        "phone": r"(?:\+1[-.\s]?)?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})\b",  # Matches multiple formats
         "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
         "credit_card": r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b",
         "ip_address": r"\b(?:\d{1,3}\.){3}\d{1,3}\b",

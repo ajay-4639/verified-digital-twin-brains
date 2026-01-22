@@ -5,6 +5,9 @@ import json
 import feedparser
 import yt_dlp
 import time
+import httpx
+import html
+import html as html_lib
 from typing import List, Dict, Optional, Any
 from PyPDF2 import PdfReader
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -199,17 +202,13 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
                     except:
                         continue
         except Exception as e:
-             print(f"[YouTube] List transcripts failed: {e}")
+            print(f"[YouTube] List transcripts failed: {e}")
 
     # -------------------------------------------------------------
     # Strategy 1.6: Direct HTTP fetch with browser headers (bypasses library blocks)
     # -------------------------------------------------------------
     if not text:
         try:
-            import httpx
-            import re
-            import json
-            
             print(f"[YouTube] Trying direct HTTP transcript fetch for {video_id}")
             log_ingestion_event(source_id, twin_id, "info", "Attempting direct HTTP transcript fetch")
             
@@ -259,7 +258,6 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
                                     
                                     if caption_texts:
                                         # Unescape HTML entities and join
-                                        import html
                                         text = " ".join([html.unescape(t.strip()) for t in caption_texts])
                                         text = re.sub(r'\s+', ' ', text).strip()
                                         log_ingestion_event(source_id, twin_id, "info", f"Direct HTTP transcript fetch successful ({len(text)} chars)")
@@ -433,9 +431,6 @@ async def ingest_x_thread(source_id: str, twin_id: str, url: str):
     text = ""
     user = "Unknown"
 
-    import httpx
-    import html as html_lib
-    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",

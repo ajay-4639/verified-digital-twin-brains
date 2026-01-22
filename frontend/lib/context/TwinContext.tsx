@@ -66,7 +66,7 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
     const getToken = useCallback(async (): Promise<string | null> => {
         try {
             const timeoutPromise = new Promise<null>((resolve) => {
-                setTimeout(() => resolve(null), 2000);
+                setTimeout(() => resolve(null), 10000);
             });
 
             const result = await Promise.race([
@@ -182,9 +182,9 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
                 // Try to get session with a timeout to prevent hanging
                 console.log('[TwinContext] Getting session with timeout...');
 
-                // Create a promise that rejects after 3 seconds
+                // Create a promise that rejects after 15 seconds
                 const timeoutPromise = new Promise((_, reject) => {
-                    setTimeout(() => reject(new Error('Session timeout')), 3000);
+                    setTimeout(() => reject(new Error('Session timeout')), 15000);
                 });
 
                 // Race the session fetch against the timeout

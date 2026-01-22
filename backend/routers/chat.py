@@ -29,6 +29,10 @@ except ImportError:
             return func
         return decorator
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 router = APIRouter(tags=["chat"])
 
 @router.post("/chat/{twin_id}")
@@ -59,7 +63,7 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                     }
                 )
         except Exception as e:
-            print(f"Langfuse trace update failed: {e}")
+            logger.warning(f"Langfuse trace update failed: {e}")
     
     # Determine user's group
     try:
@@ -71,7 +75,7 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                     if conv_response.data and conv_response.data.get("group_id"):
                         group_id = conv_response.data["group_id"]
                 except Exception as e:
-                    print(f"Warning: Could not fetch conversation group_id: {e}")
+                    logger.warning(f"Warning: Could not fetch conversation group_id: {e}")
             
             # If still no group_id, get user's default group
             if not group_id:
@@ -87,13 +91,9 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                 if default_group:
                     group_id = default_group["id"]
     except Exception as e:
-        import traceback
-        with open("error.log", "a") as f:
-            f.write(f"\n--- Chat Setup Error at {datetime.now()} ---\n")
-            f.write(traceback.format_exc())
-            f.write(f"User: {user}\n")
+        logger.error(f"Chat Setup Error: {e}", exc_info=True)
         # Don't raise, let stream generator handle it or default to None
-        print(f"Chat Setup Failed: {e}")
+        logger.error(f"Chat Setup Failed: {e}")
 
     async def stream_generator():
         nonlocal conversation_id
@@ -113,32 +113,58 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
             full_response = ""
             citations = []
             confidence_score = 1.0
+            decision_trace = None
             
             # Fetch graph stats for this twin
             from modules.graph_context import get_graph_stats
             graph_stats = get_graph_stats(twin_id)
             
-            async for chunk in run_agent_stream(
-                twin_id=twin_id,
-                query=query,
-                history=langchain_history,
-                group_id=group_id,
-                conversation_id=conversation_id
-            ):
-                # Capture metadata from tools
-                if "tools" in chunk:
-                    data = chunk["tools"]
-                    citations = data.get("citations", citations)
-                    confidence_score = data.get("confidence_score", confidence_score)
-
-                # Capture final response from agent (only if has content, not just tool calls)
-                if "agent" in chunk:
-                    msgs = chunk["agent"]["messages"]
-                    if msgs and isinstance(msgs[-1], AIMessage):
-                        msg = msgs[-1]
-                        # Only update if there's actual content (not just tool calls)
-                        if msg.content and not getattr(msg, 'tool_calls', None):
-                            full_response = msg.content
+            # DETECT REASONING INTENT (Simple Heuristic for now)
+            # In production, use a classifier model
+            is_reasoning_query = any(phrase in query.lower() for phrase in [
+                "would i ", "do i think", "what is my stance", "how do i feel"
+            ])
+            
+            if is_reasoning_query:
+                try:
+                    from modules.reasoning_engine import ReasoningEngine
+                    engine = ReasoningEngine(twin_id)
+                    trace = await engine.predict_stance(query)
+                    
+                    full_response = trace.to_readable_trace()
+                    confidence_score = trace.confidence_score
+                    decision_trace = trace.model_dump()
+                    
+                    # Log as assistant message
+                    langchain_history.append(AIMessage(content=full_response))
+                    
+                except Exception as e:
+                    print(f"Reasoning Engine Failed: {e}")
+                    # Fallback to standard agent
+                    is_reasoning_query = False
+            
+            if not is_reasoning_query:
+                async for chunk in run_agent_stream(
+                    twin_id=twin_id,
+                    query=query,
+                    history=langchain_history,
+                    group_id=group_id,
+                    conversation_id=conversation_id
+                ):
+                    # Capture metadata from tools
+                    if "tools" in chunk:
+                        data = chunk["tools"]
+                        citations = data.get("citations", citations)
+                        confidence_score = data.get("confidence_score", confidence_score)
+    
+                    # Capture final response from agent (only if has content, not just tool calls)
+                    if "agent" in chunk:
+                        msgs = chunk["agent"]["messages"]
+                        if msgs and isinstance(msgs[-1], AIMessage):
+                            msg = msgs[-1]
+                            # Only update if there's actual content (not just tool calls)
+                            if msg.content and not getattr(msg, 'tool_calls', None):
+                                full_response = msg.content
             
             # Determine if graph was likely used (no external citations and has graph)
             graph_used = graph_stats["has_graph"] and len(citations) == 0
@@ -153,7 +179,8 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                     "has_graph": graph_stats["has_graph"],
                     "node_count": graph_stats["node_count"],
                     "graph_used": graph_used
-                }
+                },
+                "decision_trace": decision_trace
             }
             yield json.dumps(metadata) + "\n"
             
@@ -276,6 +303,12 @@ async def chat_widget(twin_id: str, request: ChatWidgetRequest, req_raw: Request
     system_prompt = ""
     if twin_res.data:
         system_prompt = twin_res.data.get("settings", {}).get("system_prompt", "")
+    
+    # Inject Style Guidelines
+    from modules.graph_context import get_style_guidelines
+    style_guide = get_style_guidelines(twin_id)
+    if style_guide:
+        system_prompt += f"\n\n{style_guide}"
     
     history = get_messages(conversation_id)
     

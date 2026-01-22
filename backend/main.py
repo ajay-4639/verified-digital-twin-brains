@@ -20,7 +20,10 @@ from routers import (
     metrics,
     jobs,
     til,
-    feedback
+    feedback,
+    audio,
+    enhanced_ingestion,
+    reasoning
 )
 from modules.specializations import get_specialization
 
@@ -55,6 +58,9 @@ app.include_router(metrics.router)
 app.include_router(jobs.router)
 app.include_router(til.router)
 app.include_router(feedback.router)
+app.include_router(audio.router)
+app.include_router(enhanced_ingestion.router)
+app.include_router(reasoning.router)
 
 # Conditional VC Routes (only if explicitly enabled)
 # VC routes are conditionally loaded to prevent VC files from interfering

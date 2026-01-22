@@ -355,8 +355,17 @@ def generate_podcast_question(
                 recent_user_message = msg.get("content", "")[:100]
                 break
     
+
+    
+    # Simple context mirroring (if available and short)
+    context_mirror = ""
+    if recent_user_message and len(recent_user_message) < 50:
+        # Simple extraction of "key phrase" (naive)
+        # In production this would be an LLM call or keyword extraction
+        pass
+
     # Build contextual question
     transition = get_podcast_transition()
     
-    # For MVP, just add transition to template
+    # Combine (simple logic for now)
     return f"{transition}\n\n{template_question}"

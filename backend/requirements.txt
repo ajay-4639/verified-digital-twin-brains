@@ -28,3 +28,7 @@ youtube-transcript-api
 google-genai
 google-api-python-client
 beautifulsoup4
+elevenlabs
+firecrawl-py
+apscheduler
+httpx

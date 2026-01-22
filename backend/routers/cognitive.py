@@ -220,6 +220,8 @@ async def cognitive_interview(
                 stage=InterviewStage.DEEP_INTERVIEW.value,
                 suggested_question=question
             )
+            
+        print(f"DEBUG: Continuing Interview. Next Slot: {next_slot['slot_id']}")
 
     # ========== STAGE-BASED ROUTING ==========
     

@@ -411,3 +411,35 @@ def get_graph_context_for_chat(twin_id: str, limit: int = 20) -> Dict[str, Any]:
             "node_count": 0,
             "nodes_used": []
         }
+
+def get_style_guidelines(twin_id: str) -> str:
+    """
+    Get explicit style/tone guidelines from the graph.
+    Returns a system prompt segment.
+    """
+    try:
+        # Fetch style nodes
+        nodes_res = supabase.rpc("get_nodes_system", {
+            "t_id": twin_id,
+            "limit_val": 10
+        }).execute()
+        
+        nodes = nodes_res.data if nodes_res.data else []
+        style_instructions = []
+        
+        for n in nodes:
+            node_type = n.get("type", "").lower()
+            name = n.get("name", "")
+            desc = n.get("description", "")
+            
+            if "style" in node_type or "communication" in node_type or "tone" in node_type:
+                style_instructions.append(f"- {name}: {desc}")
+                
+        if not style_instructions:
+            return ""
+            
+        return "COMMUNICATION STYLE (Must Follow):\n" + "\n".join(style_instructions)
+        
+    except Exception as e:
+        logger.error(f"Error fetching style guidelines: {e}")
+        return ""

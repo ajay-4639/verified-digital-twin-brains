@@ -23,9 +23,43 @@
         }
     ],
     "confirmation_prompt": "Here's what I understood: {summary}. Did I get that right?",
-    "required_slots": [],
+    "required_slots": [
+        {
+            "slot_id": "background",
+            "cluster_id": "profile",
+            "priority": 1
+        },
+        {
+            "slot_id": "expertise_areas",
+            "cluster_id": "profile",
+            "priority": 2
+        },
+        {
+            "slot_id": "common_questions",
+            "cluster_id": "knowledge",
+            "priority": 3
+        },
+        {
+            "slot_id": "key_insights",
+            "cluster_id": "knowledge",
+            "priority": 4
+        },
+        {
+            "slot_id": "unique_perspective",
+            "cluster_id": "profile",
+            "priority": 5
+        },
+        {
+            "slot_id": "communication_style",
+            "cluster_id": "style",
+            "priority": 6
+        }
+    ],
     "cluster_ordering": [
-        "intent"
+        "profile",
+        "knowledge",
+        "style",
+        "boundaries"
     ],
     "prioritization_weights": {
         "required": 1.0,
@@ -38,7 +72,10 @@
         "related_to",
         "derived_from",
         "contradicts",
-        "supersedes"
+        "supersedes",
+        "expert_in",
+        "authored",
+        "values"
     ],
     "follow_up_behavior": {
         "max_follow_ups_per_slot": 2,

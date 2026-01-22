@@ -60,3 +60,22 @@ def get_pinecone_index():
             print(f"Error connecting to Pinecone index '{index_name}': {e}")
             raise e
     return _pinecone_index
+
+# ElevenLabs TTS Client
+_elevenlabs_client = None
+
+def get_elevenlabs_client():
+    """Get or create singleton ElevenLabs client."""
+    global _elevenlabs_client
+    if _elevenlabs_client is None:
+        api_key = os.getenv("ELEVENLABS_API_KEY")
+        if not api_key:
+            print("Warning: ELEVENLABS_API_KEY not found. Voice features disabled.")
+            return None
+        try:
+            from elevenlabs.client import ElevenLabs
+            _elevenlabs_client = ElevenLabs(api_key=api_key)
+        except ImportError:
+            print("Warning: elevenlabs package not installed. Run: pip install elevenlabs")
+            return None
+    return _elevenlabs_client

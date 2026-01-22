@@ -9,7 +9,10 @@ import time
 import httpx
 import html
 import html as html_lib
-from typing import List, Dict, Optional, Any
+import asyncio
+from typing import List, Dict, Optional, Any, Tuple
+from modules.transcription import transcribe_audio_multi
+from modules.embeddings import get_embedding
 from PyPDF2 import PdfReader
 from youtube_transcript_api import YouTubeTranscriptApi
 from modules.clients import get_openai_client, get_pinecone_index
@@ -17,6 +20,132 @@ from modules.observability import supabase, log_ingestion_event
 from modules.health_checks import run_all_health_checks, calculate_content_hash
 from modules.training_jobs import create_training_job
 from modules.governance import AuditLogger
+
+
+# ============================================================================
+# Enterprise Configuration & Utilities
+# ============================================================================
+
+class YouTubeConfig:
+    """Enterprise-grade YouTube ingestion configuration."""
+    MAX_RETRIES = int(os.getenv("YOUTUBE_MAX_RETRIES", "5"))
+    ASR_MODEL = os.getenv("YOUTUBE_ASR_MODEL", "whisper-large-v3")
+    ASR_PROVIDER = os.getenv("YOUTUBE_ASR_PROVIDER", "openai")
+    LANGUAGE_DETECTION = os.getenv("YOUTUBE_LANGUAGE_DETECTION", "true").lower() == "true"
+    PII_SCRUB = os.getenv("YOUTUBE_PII_SCRUB", "true").lower() == "true"
+    VERBOSE_LOGGING = os.getenv("YOUTUBE_VERBOSE_LOGGING", "false").lower() == "true"
+    COOKIES_FILE = os.getenv("YOUTUBE_COOKIES_FILE")
+    PROXY = os.getenv("YOUTUBE_PROXY")
+
+
+class ErrorClassifier:
+    """Classify YouTube/yt-dlp errors for better handling and telemetry."""
+    
+    @staticmethod
+    def classify(error_msg: str) -> Tuple[str, str, bool]:
+        """
+        Classify error and return (category, user_message, is_retryable).
+        
+        Categories:
+        - auth: Authentication/login required
+        - rate_limit: HTTP 429, quota exceeded
+        - gating: Age/region/access restrictions
+        - unavailable: Video deleted/private
+        - network: Connection/timeout issues
+        - unknown: Unclassified
+        """
+        error_lower = error_msg.lower()
+        
+        # Rate limiting
+        if "429" in error_msg or "rate" in error_lower or "quota" in error_lower or "too many requests" in error_lower:
+            return "rate_limit", "YouTube rate limit reached. Retrying with backoff...", True
+        
+        # Authentication required
+        if "403" in error_msg or "sign in" in error_lower or "unauthorized" in error_lower:
+            return "auth", "This video requires authentication or is age-restricted.", False
+        
+        # Gating (region, age, etc.)
+        if "geo" in error_lower or "region" in error_lower or "not available" in error_lower:
+            return "gating", "This video is not available in your region.", False
+        
+        # Video unavailable
+        if "unavailable" in error_lower or "deleted" in error_lower or "not found" in error_lower:
+            return "unavailable", "This video is unavailable (deleted, private, or not found).", False
+        
+        # Network issues
+        if "timeout" in error_lower or "connection" in error_lower or "socket" in error_lower:
+            return "network", "Network connection issue. Retrying...", True
+        
+        return "unknown", f"Unexpected error: {error_msg}", False
+
+
+class LanguageDetector:
+    """Lightweight language detection for transcripts."""
+    
+    # Simple heuristics for common languages (word counts and patterns)
+    LANGUAGE_PATTERNS = {
+        "en": [r"\b(the|and|a|to|of|in|is|that|it)\b"],
+        "es": [r"\b(el|la|de|que|y|a|en|un|es)\b"],
+        "fr": [r"\b(le|la|de|et|a|en|un|est|c'est)\b"],
+        "de": [r"\b(der|die|und|in|den|von|zu|das)\b"],
+        "ja": [r"[ぁ-ん]|[ァ-ヴー]|[一-龥]"],
+        "zh": [r"[\u4e00-\u9fff]"],
+    }
+    
+    @staticmethod
+    def detect(text: str) -> str:
+        """Detect language of text. Returns language code (e.g., 'en', 'es')."""
+        if not text or len(text) < 10:
+            return "en"  # Default
+        
+        text_lower = text.lower()
+        scores = {}
+        
+        for lang, patterns in LanguageDetector.LANGUAGE_PATTERNS.items():
+            count = 0
+            for pattern in patterns:
+                count += len(re.findall(pattern, text_lower))
+            scores[lang] = count
+        
+        if scores:
+            return max(scores, key=scores.get)
+        return "en"
+
+
+class PIIScrubber:
+    """Lightweight PII detection and redaction."""
+    
+    # Regex patterns for common PII (very permissive, for flagging)
+    PATTERNS = {
+        "email": r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+        "phone": r"(?:\+1[-.\s]?)?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})\b",  # Matches multiple formats
+        "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
+        "credit_card": r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b",
+        "ip_address": r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+    }
+    
+    @staticmethod
+    def detect_pii(text: str) -> Dict[str, List[str]]:
+        """Detect PII in text. Returns dict of pii_type -> [matches]."""
+        detected = {}
+        for pii_type, pattern in PIIScrubber.PATTERNS.items():
+            matches = re.findall(pattern, text)
+            if matches:
+                detected[pii_type] = matches
+        return detected
+    
+    @staticmethod
+    def has_pii(text: str) -> bool:
+        """Check if text contains any PII."""
+        return bool(PIIScrubber.detect_pii(text))
+    
+    @staticmethod
+    def scrub(text: str) -> str:
+        """Redact PII from text."""
+        for pii_type, pattern in PIIScrubber.PATTERNS.items():
+            placeholder = f"[{pii_type.upper()}]"
+            text = re.sub(pattern, placeholder, text)
+        return text
 
 
 def extract_text_from_pdf(file_path: str) -> str:
@@ -43,7 +172,7 @@ def extract_video_id(url: str) -> str:
     return None
 
 
-from modules.transcription import transcribe_audio_multi
+
 
 
 def _build_yt_dlp_opts(video_id: str, source_id: str, twin_id: str) -> dict:
@@ -105,7 +234,14 @@ def _build_yt_dlp_opts(video_id: str, source_id: str, twin_id: str) -> dict:
         ydl_opts['cookiefile'] = cookie_file
         log_ingestion_event(source_id, twin_id, "info", "Using YOUTUBE_COOKIES_FILE for YouTube download")
     else:
-        log_ingestion_event(source_id, twin_id, "info", "No cookie file found; using client emulation only")
+        if YouTubeConfig.VERBOSE_LOGGING:
+            log_ingestion_event(source_id, twin_id, "info", "No cookie file found; using client emulation only")
+
+    # Log configuration for telemetry
+    log_ingestion_event(source_id, twin_id, "info", 
+        f"YouTube config: ASR={YouTubeConfig.ASR_PROVIDER}:{YouTubeConfig.ASR_MODEL}, "
+        f"MaxRetries={YouTubeConfig.MAX_RETRIES}, LanguageDetection={YouTubeConfig.LANGUAGE_DETECTION}, "
+        f"PIIScrub={YouTubeConfig.PII_SCRUB}")
 
     return ydl_opts, temp_dir, temp_filename
 
@@ -286,71 +422,111 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
 
     # -------------------------------------------------------------
     # Strategy 2: yt-dlp with Multiple Client Emulation & Better Error Handling
+    # Using YouTubeRetryStrategy for enterprise-grade retry logic
     # -------------------------------------------------------------
     if not text:
         print("[YouTube] No captions found. Starting robust audio download...")
         log_ingestion_event(source_id, twin_id, "warning", "Attempting robust audio download (yt-dlp with multiple clients)")
 
+        from modules.youtube_retry_strategy import YouTubeRetryStrategy
+        from modules.ingestion import ErrorClassifier
+        
         ydl_opts, temp_dir, temp_filename = _build_yt_dlp_opts(video_id, source_id, twin_id)
-
-        # Up to 5 retries with exponential backoff for transient issues
-        attempts = 0
-        last_error = None
-        while attempts < 5 and not text:
-            attempts += 1
+        
+        # Initialize retry strategy with configured max_retries
+        config = YouTubeConfig()
+        strategy = YouTubeRetryStrategy(
+            source_id=source_id,
+            twin_id=twin_id,
+            max_retries=config.MAX_RETRIES,
+            verbose=config.VERBOSE_LOGGING
+        )
+        
+        temp_audio_path = None
+        
+        while strategy.attempts < strategy.max_retries and not text:
             try:
-                print(f"[YouTube] Download attempt {attempts}/5 for {video_id}")
+                strategy.attempts += 1
+                print(f"[YouTube] Download attempt {strategy.attempts}/{strategy.max_retries} for {video_id}")
+                
+                # Download audio
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
 
-                audio_path = os.path.join(temp_dir, f"{temp_filename}.mp3")
+                temp_audio_path = os.path.join(temp_dir, f"{temp_filename}.mp3")
                 
-                if not os.path.exists(audio_path):
-                    raise FileNotFoundError(f"Audio file not created at {audio_path}")
+                if not os.path.exists(temp_audio_path):
+                    raise FileNotFoundError(f"Audio file not created at {temp_audio_path}")
 
                 # Transcribe
                 print(f"[YouTube] Transcribing audio for {video_id}")
-                text = transcribe_audio_multi(audio_path)
-                log_ingestion_event(source_id, twin_id, "info", f"Audio transcribed via Gemini/Whisper ({len(text)} chars)")
-
-                # Cleanup
-                if os.path.exists(audio_path):
-                    os.remove(audio_path)
-                    
-                print(f"[YouTube] Successfully transcribed {video_id}: {len(text)} characters")
+                text = transcribe_audio_multi(temp_audio_path)
+                
+                # Language detection
+                language = LanguageDetector.detect(text)
+                
+                # PII detection
+                pii_detected = PIIScrubber.has_pii(text) if config.PII_SCRUB else False
+                detected_pii = PIIScrubber.detect_pii(text) if pii_detected else []
+                
+                # Log success with metadata
+                strategy.log_success(
+                    content_length=len(text),
+                    metadata={
+                        "language": language,
+                        "has_pii": pii_detected,
+                        "pii_count": len(detected_pii)
+                    }
+                )
+                
+                log_ingestion_event(
+                    source_id, twin_id, "info",
+                    f"Audio transcribed via Gemini/Whisper ({len(text)} chars, lang={language}, pii={pii_detected})"
+                )
+                
+                print(f"[YouTube] Successfully transcribed {video_id}: {len(text)} characters, language={language}")
                 
             except Exception as download_error:
-                last_error = str(download_error)
-                print(f"[YouTube] Attempt {attempts} failed: {last_error}")
-                log_ingestion_event(source_id, twin_id, "warning", f"Download attempt {attempts} failed: {last_error}")
+                error_msg = str(download_error)
+                error_category, user_msg, retryable = ErrorClassifier.classify(error_msg)
                 
-                if attempts < 5:
-                    # Exponential backoff: 2, 4, 8, 16 seconds
-                    backoff = 2 ** attempts
-                    print(f"[YouTube] Waiting {backoff}s before retry...")
-                    time.sleep(backoff)
-                continue
+                strategy.log_attempt(error_msg)
+                
+                print(f"[YouTube] Attempt {strategy.attempts} failed [{error_category}]: {error_msg}")
+                log_ingestion_event(
+                    source_id, twin_id, "warning",
+                    f"Download attempt {strategy.attempts} failed [{error_category}]: {error_msg}"
+                )
+                
+                # Determine if we should retry
+                if not strategy.should_retry(error_category):
+                    print(f"[YouTube] Error category '{error_category}' is non-retryable, stopping attempts")
+                    break
+                
+                if strategy.attempts < strategy.max_retries:
+                    wait_time = strategy.wait_for_retry()
+                    print(f"[YouTube] Waiting {wait_time}s before retry...")
+                else:
+                    break
+
+        # Cleanup temp file
+        if temp_audio_path and os.path.exists(temp_audio_path):
+            try:
+                os.remove(temp_audio_path)
+            except:
+                pass
 
         if not text:
-            # Parse error to provide helpful guidance
-            error_msg = last_error or "Unknown download error"
+            # Get final error message with classification
+            final_error = strategy.get_final_error_message(strategy.last_error or "Unknown error")
+            metrics = strategy.get_metrics()
             
-            if "403" in error_msg or "Sign in" in error_msg or "bot" in error_msg.lower():
-                raise ValueError(
-                    "YouTube blocked the connection (HTTP 403). This can happen if: "
-                    "(1) The video doesn't have public captions (look for CC badge on videos like TED-Ed or Khan Academy), "
-                    "(2) YouTube is rate-limiting your IP address, "
-                    "(3) The video requires authentication or is region-restricted. "
-                    "Solutions: Try a public educational video with captions, or set YOUTUBE_PROXY to route through a proxy service."
-                )
-            elif "unavailable" in error_msg.lower():
-                raise ValueError(
-                    "This video is unavailable. It may be: "
-                    "(1) Deleted, (2) Private, (3) Age-restricted, or (4) Region-restricted. "
-                    "Please try a different public video."
-                )
-            else:
-                raise ValueError(f"Download failed: {error_msg}")
+            log_ingestion_event(
+                source_id, twin_id, "error",
+                f"YouTube ingestion failed after {strategy.attempts} attempts. Metrics: {metrics}"
+            )
+            
+            raise ValueError(final_error)
 
     if not text:
         raise ValueError(
@@ -612,8 +788,7 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[st
         chunks.append(text[i:i + chunk_size])
     return chunks
 
-# Embedding generation moved to modules.embeddings
-from modules.embeddings import get_embedding
+
 
 
 async def analyze_chunk_content(text: str) -> dict:

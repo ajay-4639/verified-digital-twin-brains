@@ -6,6 +6,7 @@ from routers import (
     auth,
     chat,
     ingestion,
+    youtube_preflight,
     twins,
     actions,
     knowledge,
@@ -19,7 +20,10 @@ from routers import (
     metrics,
     jobs,
     til,
-    feedback
+    feedback,
+    audio,
+    enhanced_ingestion,
+    reasoning
 )
 from modules.specializations import get_specialization
 
@@ -39,6 +43,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(chat.router)
 app.include_router(ingestion.router)
+app.include_router(youtube_preflight.router)
 app.include_router(twins.router)
 app.include_router(actions.router)
 app.include_router(knowledge.router)
@@ -53,6 +58,9 @@ app.include_router(metrics.router)
 app.include_router(jobs.router)
 app.include_router(til.router)
 app.include_router(feedback.router)
+app.include_router(audio.router)
+app.include_router(enhanced_ingestion.router)
+app.include_router(reasoning.router)
 
 # Conditional VC Routes (only if explicitly enabled)
 # VC routes are conditionally loaded to prevent VC files from interfering

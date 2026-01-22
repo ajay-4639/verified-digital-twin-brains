@@ -35,6 +35,18 @@ services:
         sync: false
       - key: GOOGLE_API_KEY
         sync: false
+      - key: YOUTUBE_MAX_RETRIES
+        value: "5"
+      - key: YOUTUBE_ASR_MODEL
+        value: "whisper-large-v3"
+      - key: YOUTUBE_ASR_PROVIDER
+        value: "openai"
+      - key: YOUTUBE_LANGUAGE_DETECTION
+        value: "true"
+      - key: YOUTUBE_PII_SCRUB
+        value: "true"
+      - key: YOUTUBE_VERBOSE_LOGGING
+        value: "false"
 
   # Background Worker for Job Queue Processing
   - type: worker
@@ -68,4 +80,15 @@ services:
       - key: YOUTUBE_PROXY
         sync: false
       - key: GOOGLE_API_KEY
-        sync: false
+        sync: false      - key: YOUTUBE_MAX_RETRIES
+        value: "5"
+      - key: YOUTUBE_ASR_MODEL
+        value: "whisper-large-v3"
+      - key: YOUTUBE_ASR_PROVIDER
+        value: "openai"
+      - key: YOUTUBE_LANGUAGE_DETECTION
+        value: "true"
+      - key: YOUTUBE_PII_SCRUB
+        value: "true"
+      - key: YOUTUBE_VERBOSE_LOGGING
+        value: "false"

@@ -118,7 +118,7 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
         raise ValueError("Invalid YouTube URL")
 
     # -------------------------------------------------------------
-    # Step 0: Create Source Record IMMEDIATELY (Fixes FK Error)
+    # Step 0: Ensure Source Record exists
     # -------------------------------------------------------------
     try:
         # Check if exists first to handle updates
@@ -134,9 +134,11 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
                 "staging_status": "processing"
             }).execute()
             print(f"[YouTube] Created processing record for {source_id}")
+            
+            # Brief wait to ensure DB propagation (especially with replica lag if any)
+            await asyncio.sleep(1)
     except Exception as e:
-        print(f"[YouTube] Error creating source record: {e}")
-        # Continue anyway, it might stem from a race condition or retry
+        print(f"[YouTube] Error or duplicate during source record creation: {e}")
 
     text = None
     video_title = None
@@ -231,10 +233,24 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
                     page_content = response.text
                     
                     # Extract caption track URLs from the page
+                    # Strategy 1.6.a: Main Player Response
                     caption_match = re.search(r'"captionTracks":\s*(\[.*?\])', page_content)
+                    
+                    # Strategy 1.6.b: Escaped JSON (mobile/older formats)
+                    if not caption_match:
+                        caption_match = re.search(r'captionTracks\\":(\[.*?\])', page_content)
+                    
+                    # Strategy 1.6.c: Alternative escaped format
+                    if not caption_match:
+                        caption_match = re.search(r'\\u0022captionTracks\\u0022:\\s*(\\\[.*?\\\])', page_content)
+
                     if caption_match:
+                        print(f"[YouTube] Found caption tracks on page")
                         try:
-                            caption_tracks = json.loads(caption_match.group(1))
+                            raw_json = caption_match.group(1).replace('\\"', '"').replace('\\\\', '\\').replace('\\u0022', '"')
+                            # Ensure we handle double brackets from some escaped formats
+                            if raw_json.startswith('\\['): raw_json = json.loads(f'"{raw_json}"')
+                            caption_tracks = json.loads(raw_json)
                             
                             # Find English or first available caption
                             caption_url = None
@@ -539,8 +555,8 @@ async def ingest_x_thread(source_id: str, twin_id: str, url: str):
     try:
         content_hash = calculate_content_hash(text)
 
-        # Record source in Supabase
-        supabase.table("sources").insert({
+        # Record source in Supabase - use upsert to be safe
+        supabase.table("sources").upsert({
             "id": source_id,
             "twin_id": twin_id,
             "filename": f"X Thread: {tweet_id} by {user}",
@@ -551,6 +567,9 @@ async def ingest_x_thread(source_id: str, twin_id: str, url: str):
             "staging_status": "approved",
             "extracted_text_length": len(text)
         }).execute()
+
+        # Small verification wait to settle FK
+        await asyncio.sleep(1)
 
         log_ingestion_event(source_id, twin_id, "info", f"X thread extracted: {len(text)} characters")
 

@@ -23,7 +23,8 @@ from routers import (
     feedback,
     audio,
     enhanced_ingestion,
-    reasoning
+    reasoning,
+    interview
 )
 from modules.specializations import get_specialization
 
@@ -61,6 +62,7 @@ app.include_router(feedback.router)
 app.include_router(audio.router)
 app.include_router(enhanced_ingestion.router)
 app.include_router(reasoning.router)
+app.include_router(interview.router)
 
 # Conditional VC Routes (only if explicitly enabled)
 # VC routes are conditionally loaded to prevent VC files from interfering

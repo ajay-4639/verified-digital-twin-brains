@@ -400,7 +400,9 @@ async def create_realtime_session(
     # Extract client_secret from response
     client_secret = session_data.get("client_secret", {}).get("value", "")
     session_id = session_data.get("id", str(uuid.uuid4()))
-    expires_at = session_data.get("client_secret", {}).get("expires_at", "")
+    # OpenAI returns expires_at as Unix timestamp integer - convert to string
+    expires_at_raw = session_data.get("client_secret", {}).get("expires_at", "")
+    expires_at = str(expires_at_raw) if expires_at_raw else ""
     
     if not client_secret:
         raise HTTPException(

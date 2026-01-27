@@ -50,24 +50,53 @@ async def list_specializations():
 async def create_twin(request: TwinCreateRequest, user=Depends(get_current_user)):
     """Create a new twin. Requires authentication to ensure correct tenant association."""
     try:
-        # CRITICAL: Use authenticated user's tenant_id, NOT the request body
-        # This prevents the tenant_id mismatch bug where frontend sent auth user ID
-        # instead of actual tenant UUID
+        user_id = user.get("user_id")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        
+        # Get tenant_id from authenticated user
         authenticated_tenant_id = user.get("tenant_id")
         
-        # If user has no tenant yet, try to use the request tenant_id as fallback
-        # (for first-time users before sync-user completes)
+        # If user has no tenant yet (new user, sync-user not called), auto-create one
+        # CRITICAL: DO NOT use request.tenant_id as fallback - it contains the wrong ID!
         if not authenticated_tenant_id:
-            authenticated_tenant_id = request.tenant_id
+            print(f"[TWINS] User {user_id} has no tenant, auto-creating...")
             
-        if not authenticated_tenant_id:
-            raise HTTPException(status_code=400, detail="No tenant associated with user. Please refresh and try again.")
+            # Create a new tenant for this user
+            try:
+                email = user.get("email", "")
+                name = user.get("name") or email.split("@")[0] if email else "User"
+                
+                tenant_insert = supabase.table("tenants").insert({
+                    "name": f"{name}'s Workspace"
+                }).execute()
+                
+                if tenant_insert.data:
+                    authenticated_tenant_id = tenant_insert.data[0]["id"]
+                    print(f"[TWINS] Created tenant {authenticated_tenant_id}")
+                    
+                    # Update/create user record with this tenant
+                    user_data = {
+                        "id": user_id,
+                        "email": email,
+                        "tenant_id": authenticated_tenant_id,
+                        "full_name": name
+                    }
+                    supabase.table("users").upsert(user_data).execute()
+                    print(f"[TWINS] Linked user to tenant")
+                else:
+                    raise HTTPException(status_code=500, detail="Failed to create tenant")
+            except HTTPException:
+                raise
+            except Exception as e:
+                print(f"[TWINS] ERROR creating tenant: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to create tenant: {str(e)}")
         
-        # First, ensure tenant exists (create if not)
+        # Ensure tenant exists in DB (defensive check)
         tenant_check = supabase.table("tenants").select("id").eq("id", authenticated_tenant_id).execute()
         
         if not tenant_check.data:
-            # Create tenant with this ID
+            # Tenant ID exists but tenant doesn't - create it
             supabase.table("tenants").insert({
                 "id": authenticated_tenant_id,
                 "name": f"User-{authenticated_tenant_id[:8]}"
@@ -76,21 +105,24 @@ async def create_twin(request: TwinCreateRequest, user=Depends(get_current_user)
         # Now create the twin with the CORRECT tenant_id
         data = {
             "name": request.name,
-            "tenant_id": authenticated_tenant_id,  # Use authenticated tenant, not request
+            "tenant_id": authenticated_tenant_id,  # Always use authenticated tenant
             "description": request.description or f"{request.name}'s digital twin",
             "specialization": request.specialization,
             "settings": request.settings or {}
         }
         
+        print(f"[TWINS] Creating twin with tenant_id={authenticated_tenant_id}")
         response = supabase.table("twins").insert(data).execute()
         
         if response.data:
+            print(f"[TWINS] Twin created: {response.data[0].get('id')}")
             return response.data[0]
         else:
             raise HTTPException(status_code=400, detail="Failed to create twin")
     except HTTPException:
         raise
     except Exception as e:
+        print(f"[TWINS] ERROR: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 from modules.auth_guard import verify_twin_ownership

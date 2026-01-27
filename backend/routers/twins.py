@@ -47,23 +47,36 @@ async def list_specializations():
 # ============================================================================
 
 @router.post("/twins")
-async def create_twin(request: TwinCreateRequest):
-    """Create a new twin. Uses service account to bypass RLS."""
+async def create_twin(request: TwinCreateRequest, user=Depends(get_current_user)):
+    """Create a new twin. Requires authentication to ensure correct tenant association."""
     try:
+        # CRITICAL: Use authenticated user's tenant_id, NOT the request body
+        # This prevents the tenant_id mismatch bug where frontend sent auth user ID
+        # instead of actual tenant UUID
+        authenticated_tenant_id = user.get("tenant_id")
+        
+        # If user has no tenant yet, try to use the request tenant_id as fallback
+        # (for first-time users before sync-user completes)
+        if not authenticated_tenant_id:
+            authenticated_tenant_id = request.tenant_id
+            
+        if not authenticated_tenant_id:
+            raise HTTPException(status_code=400, detail="No tenant associated with user. Please refresh and try again.")
+        
         # First, ensure tenant exists (create if not)
-        tenant_check = supabase.table("tenants").select("id").eq("id", request.tenant_id).execute()
+        tenant_check = supabase.table("tenants").select("id").eq("id", authenticated_tenant_id).execute()
         
         if not tenant_check.data:
             # Create tenant with this ID
             supabase.table("tenants").insert({
-                "id": request.tenant_id,
-                "name": f"User-{request.tenant_id[:8]}"
+                "id": authenticated_tenant_id,
+                "name": f"User-{authenticated_tenant_id[:8]}"
             }).execute()
         
-        # Now create the twin
+        # Now create the twin with the CORRECT tenant_id
         data = {
             "name": request.name,
-            "tenant_id": request.tenant_id,
+            "tenant_id": authenticated_tenant_id,  # Use authenticated tenant, not request
             "description": request.description or f"{request.name}'s digital twin",
             "specialization": request.specialization,
             "settings": request.settings or {}
@@ -75,6 +88,8 @@ async def create_twin(request: TwinCreateRequest):
             return response.data[0]
         else:
             raise HTTPException(status_code=400, detail="Failed to create twin")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -24,6 +24,8 @@ class URLIngestRequest(BaseModel):
 
 @router.post("/ingest/youtube/{twin_id}")
 async def ingest_youtube(twin_id: str, request: YouTubeIngestRequest, user=Depends(verify_owner)):
+    # SECURITY: Verify user owns this twin before ingesting content
+    verify_twin_ownership(twin_id, user)
     try:
         source_id = await ingest_youtube_transcript_wrapper(twin_id, request.url)
         return {"source_id": source_id, "status": "processing"}
@@ -32,6 +34,8 @@ async def ingest_youtube(twin_id: str, request: YouTubeIngestRequest, user=Depen
 
 @router.post("/ingest/podcast/{twin_id}")
 async def ingest_podcast(twin_id: str, request: PodcastIngestRequest, user=Depends(verify_owner)):
+    # SECURITY: Verify user owns this twin before ingesting content
+    verify_twin_ownership(twin_id, user)
     try:
         source_id = await ingest_podcast_transcript(twin_id, request.url)
         return {"source_id": source_id, "status": "processing"}
@@ -40,6 +44,8 @@ async def ingest_podcast(twin_id: str, request: PodcastIngestRequest, user=Depen
 
 @router.post("/ingest/x/{twin_id}")
 async def ingest_x(twin_id: str, request: XThreadIngestRequest, user=Depends(verify_owner)):
+    # SECURITY: Verify user owns this twin before ingesting content
+    verify_twin_ownership(twin_id, user)
     try:
         source_id = await ingest_x_thread_wrapper(twin_id, request.url)
         return {"source_id": source_id, "status": "processing"}
@@ -52,6 +58,8 @@ async def ingest_file_endpoint(
     file: UploadFile = File(...),
     user=Depends(verify_owner)
 ):
+    # SECURITY: Verify user owns this twin before ingesting content
+    verify_twin_ownership(twin_id, user)
     try:
         source_id = await ingest_file(twin_id, file)
         return {"source_id": source_id, "status": "processing"}
@@ -60,6 +68,8 @@ async def ingest_file_endpoint(
 
 @router.post("/ingest/url/{twin_id}")
 async def ingest_url_endpoint(twin_id: str, request: URLIngestRequest, user=Depends(verify_owner)):
+    # SECURITY: Verify user owns this twin before ingesting content
+    verify_twin_ownership(twin_id, user)
     try:
         source_id = await ingest_url(twin_id, request.url)
         return {"source_id": source_id, "status": "processing"}
@@ -77,8 +87,18 @@ async def process_queue_endpoint(twin_id: Optional[str] = None, user=Depends(ver
     if not user_id:
         raise HTTPException(status_code=401, detail="User not authenticated")
 
-    # Get user's twins
-    twins_result = supabase.table("twins").select("id").eq("tenant_id", user_id).execute()
+    # Get user's twins - use tenant_id NOT user_id!
+    # CRITICAL FIX: user_id is auth UUID, tenant_id is the actual tenant association
+    tenant_id = user.get("tenant_id")
+    if not tenant_id:
+        return {
+            "status": "error",
+            "processed": 0,
+            "failed": 0,
+            "remaining": 0,
+            "message": "User has no tenant association"
+        }
+    twins_result = supabase.table("twins").select("id").eq("tenant_id", tenant_id).execute()
     user_twin_ids = [t["id"] for t in (twins_result.data or [])]
 
     if not user_twin_ids:

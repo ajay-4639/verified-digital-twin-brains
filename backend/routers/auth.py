@@ -194,10 +194,7 @@ async def get_my_twins(user=Depends(get_current_user)):
     # Note: twins table uses tenant_id
     result = supabase.table("twins").select("*").eq("tenant_id", tenant_id).execute()
     
-    return {
-        "twins": result.data if result.data else [],
-        "count": len(result.data) if result.data else 0
-    }
+    return result.data if result.data else []
 
 # API Keys
 @router.post("/api-keys")

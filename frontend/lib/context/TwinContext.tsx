@@ -134,12 +134,14 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
             }
 
             if (data) {
-                console.log('[TwinContext] Got twins:', data.twins?.length || 0);
-                setTwins(data.twins || []);
+                // Defensive: handle both raw array and object envelope formats
+                const twinsList = Array.isArray(data) ? data : (data.twins || []);
+                console.log('[TwinContext] Got twins:', twinsList.length);
+                setTwins(twinsList);
 
                 // Set active twin from localStorage or first twin
                 const savedTwinId = localStorage.getItem('activeTwinId');
-                const activeTwinFromList = data.twins?.find((t: Twin) => t.id === savedTwinId) || data.twins?.[0];
+                const activeTwinFromList = twinsList.find((t: Twin) => t.id === savedTwinId) || twinsList[0];
 
                 if (activeTwinFromList) {
                     setActiveTwinState(activeTwinFromList);

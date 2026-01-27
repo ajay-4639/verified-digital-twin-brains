@@ -142,10 +142,7 @@ async def list_twins(user=Depends(get_current_user)):
         twins_list = response.data if response.data else []
         print(f"[TWINS] Listing twins for tenant {tenant_id}: found {len(twins_list)}")
         
-        return {
-            "twins": twins_list,
-            "count": len(twins_list)
-        }
+        return twins_list
     except Exception as e:
         print(f"[TWINS] ERROR listing twins: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime, date, timedelta
 from modules.observability import supabase
-from modules.auth_guard import get_current_user, verify_twin_ownership
+from modules.auth_guard import get_current_user, verify_twin_ownership, verify_owner
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 

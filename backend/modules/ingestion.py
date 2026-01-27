@@ -864,9 +864,23 @@ async def process_and_index_text(source_id: str, twin_id: str, text: str, metada
             "metadata": metadata
         })
 
-    # Upsert in batches of 100
-    for i in range(0, len(vectors), 100):
-        index.upsert(vectors[i:i + 100], namespace=twin_id)
+    # Phase 8: Emit event for Action Engine
+    from modules.actions_engine import EventEmitter
+    EventEmitter.emit(
+        twin_id=twin_id,
+        event_type="source_ingested",
+        payload={
+            "source_id": source_id,
+            "filename": metadata_override.get("filename") if metadata_override else "Document",
+            "type": metadata_override.get("type", "file") if metadata_override else "file",
+            "chunks_indexed": len(vectors),
+            "content_preview": text[:1000] # For trigger matching (keywords)
+        },
+        source_context={
+            "source": "ingestion_engine",
+            "method": "process_and_index_text"
+        }
+    )
 
     return len(vectors)
 

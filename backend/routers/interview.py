@@ -138,25 +138,24 @@ async def _get_user_context(user_id: str, task: str = "interview") -> str:
     
     Priority order: boundaries > constraints > active goals > stable preferences > recent intent
     """
-    # TODO: Replace with actual Zep/Graphiti integration
-    # For now, check if we have any memories in Supabase
     try:
-        # Check for existing interview sessions with extracted memories
-        sessions_resp = supabase.table("interview_sessions").select(
-            "id, transcript, memories_extracted"
-        ).eq("user_id", user_id).eq("status", "completed").order(
-            "ended_at", desc=True
-        ).limit(5).execute()
+        from modules.zep_memory import get_zep_client
+        zep_client = get_zep_client()
         
-        if not sessions_resp.data:
-            return ""
+        # This will query Graphiti for prioritized context facts
+        context = await zep_client.get_user_context(
+            user_id=user_id,
+            task=task,
+            max_tokens=2000
+        )
         
-        # TODO: This is a placeholder - real implementation will query Zep/Graphiti
-        # For now, return empty to trigger fresh interview
-        return ""
+        if context:
+            print(f"[Interview] Retrieved {len(context)} chars of context for user {user_id}")
+        
+        return context
         
     except Exception as e:
-        print(f"Error fetching user context: {e}")
+        print(f"Error fetching user context from Zep: {e}")
         return ""
 
 

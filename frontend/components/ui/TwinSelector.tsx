@@ -4,12 +4,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useTwin } from '@/lib/context/TwinContext';
 
-interface Twin {
-    id: string;
-    name: string;
-    specialization?: string;
-    is_active?: boolean;
-}
+
 
 interface TwinSelectorProps {
     activeTwinId: string | null;

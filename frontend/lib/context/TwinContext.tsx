@@ -13,7 +13,7 @@ export interface Twin {
     name: string;
     owner_id: string;
     tenant_id: string;
-    specialization_id: string;
+    specialization: string;
     is_active: boolean;
     settings?: Record<string, unknown>;
     system_instructions?: string;

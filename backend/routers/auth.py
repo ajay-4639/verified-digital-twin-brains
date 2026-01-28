@@ -189,12 +189,60 @@ async def get_current_user_profile(user=Depends(get_current_user)):
 @router.get("/auth/my-twins")
 async def get_my_twins(user=Depends(get_current_user)):
     """Get all twins owned by the current user."""
+    user_id = user.get("user_id")
     tenant_id = user.get("tenant_id")
+    
+    # CRITICAL: Log tenant_id state for debugging
+    print(f"[MY-TWINS DEBUG] user_id={user_id}, tenant_id={tenant_id}")
+    
+    # If tenant_id is null, attempt auto-recovery
+    if not tenant_id:
+        print(f"[MY-TWINS WARNING] User {user_id} has no tenant_id. Attempting auto-recovery...")
+        
+        # Check if user exists in users table
+        user_check = supabase.table("users").select("id, tenant_id, email").eq("id", user_id).execute()
+        
+        if user_check.data and len(user_check.data) > 0:
+            existing_tenant_id = user_check.data[0].get("tenant_id")
+            if existing_tenant_id:
+                # User has tenant_id in DB but auth didn't pick it up - use it
+                tenant_id = existing_tenant_id
+                print(f"[MY-TWINS DEBUG] Recovered tenant_id from DB: {tenant_id}")
+            else:
+                # User exists but has no tenant - this is a data integrity issue
+                # Auto-create tenant for the user
+                email = user_check.data[0].get("email", "unknown")
+                try:
+                    tenant_insert = supabase.table("tenants").insert({
+                        "name": f"{email.split('@')[0]}'s Workspace"
+                    }).execute()
+                    if tenant_insert.data:
+                        new_tenant_id = tenant_insert.data[0]["id"]
+                        # Update user with new tenant_id
+                        supabase.table("users").update({
+                            "tenant_id": new_tenant_id
+                        }).eq("id", user_id).execute()
+                        tenant_id = new_tenant_id
+                        print(f"[MY-TWINS DEBUG] Auto-created tenant for user: {tenant_id}")
+                except Exception as e:
+                    print(f"[MY-TWINS ERROR] Failed to auto-create tenant: {e}")
+        else:
+            print(f"[MY-TWINS WARNING] User {user_id} not found in users table - needs sync-user first")
+            # Return empty list - user needs to complete signup flow
+            return []
+    
+    # Now fetch twins with the (possibly recovered) tenant_id
+    if not tenant_id:
+        print(f"[MY-TWINS ERROR] Could not resolve tenant_id for user {user_id}")
+        return []
     
     # Note: twins table uses tenant_id
     result = supabase.table("twins").select("*").eq("tenant_id", tenant_id).execute()
     
-    return result.data if result.data else []
+    twins = result.data if result.data else []
+    print(f"[MY-TWINS DEBUG] Returning {len(twins)} twins for tenant {tenant_id}")
+    
+    return twins
 
 # API Keys
 @router.post("/api-keys")

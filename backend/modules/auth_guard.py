@@ -135,16 +135,31 @@ def get_current_user(
         user_metadata = payload.get("user_metadata", {})
         
         # Lookup tenant_id from database (not in JWT)
+        # PRIMARY: Try direct tenant_id column (more reliable)
+        # FALLBACK: Try join through tenants table
         tenant_id = None
         try:
-            user_lookup = supabase_client.table("users").select("tenants(id)").eq("id", user_id).execute()
+            # First try direct tenant_id column
+            user_lookup = supabase_client.table("users").select("tenant_id").eq("id", user_id).execute()
             if user_lookup.data and len(user_lookup.data) > 0:
-                tenants_data = user_lookup.data[0].get("tenants")
-                if isinstance(tenants_data, dict):
-                    tenant_id = tenants_data.get("id")
+                tenant_id = user_lookup.data[0].get("tenant_id")
+                print(f"[AUTH DEBUG] tenant_id from direct lookup: {tenant_id}")
+            
+            # Fallback: try join through tenants table
+            if not tenant_id:
+                user_lookup = supabase_client.table("users").select("tenants(id)").eq("id", user_id).execute()
+                if user_lookup.data and len(user_lookup.data) > 0:
+                    tenants_data = user_lookup.data[0].get("tenants")
+                    if isinstance(tenants_data, dict):
+                        tenant_id = tenants_data.get("id")
+                        print(f"[AUTH DEBUG] tenant_id from join: {tenant_id}")
+            
+            # CRITICAL: Log if tenant_id is still null for debugging
+            if not tenant_id:
+                print(f"[AUTH WARNING] User {user_id} has NO tenant_id - twins will return empty")
         except Exception as e:
             # User might not exist yet (first login) - sync-user will create them
-            print(f"Tenant lookup failed (expected for new users): {e}")
+            print(f"[AUTH ERROR] Tenant lookup failed for user {user_id}: {e}")
 
         # Update user activity timestamp (best effort)
         try:

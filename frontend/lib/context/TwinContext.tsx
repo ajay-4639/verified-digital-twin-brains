@@ -36,6 +36,7 @@ interface TwinContextType {
     user: UserProfile | null;
     isAuthenticated: boolean;
     isLoading: boolean;
+    error: string | null;  // NEW: Explicit error state
 
     // Twin state
     twins: Twin[];
@@ -58,27 +59,43 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
     const [twins, setTwins] = useState<Twin[]>([]);
     const [activeTwin, setActiveTwinState] = useState<Twin | null>(null);
     const [isLoading, setIsLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);  // NEW: Track errors
 
     const supabase = getSupabaseClient();
     const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
 
-    // Get auth token (with timeout to prevent hanging)
+    // Get auth token (with timeout and retry logic)
     const getToken = useCallback(async (): Promise<string | null> => {
-        try {
-            const timeoutPromise = new Promise<null>((resolve) => {
-                setTimeout(() => resolve(null), 10000);
-            });
+        const maxRetries = 3;
+        const baseTimeout = 5000; // 5 seconds per attempt
 
-            const result = await Promise.race([
-                supabase.auth.getSession(),
-                timeoutPromise
-            ]) as any;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                console.log(`[TwinContext] getToken attempt ${attempt}/${maxRetries}`);
+                const timeoutPromise = new Promise<null>((resolve) => {
+                    setTimeout(() => resolve(null), baseTimeout * attempt);
+                });
 
-            return result?.data?.session?.access_token || null;
-        } catch (e) {
-            console.warn('[TwinContext] getToken failed:', e);
-            return null;
+                const result = await Promise.race([
+                    supabase.auth.getSession(),
+                    timeoutPromise
+                ]) as any;
+
+                const token = result?.data?.session?.access_token || null;
+                if (token) {
+                    console.log('[TwinContext] Token obtained successfully');
+                    return token;
+                }
+
+                // No token on this attempt, continue to retry
+                console.warn(`[TwinContext] No token on attempt ${attempt}`);
+            } catch (e) {
+                console.warn(`[TwinContext] getToken attempt ${attempt} failed:`, e);
+            }
         }
+
+        console.error('[TwinContext] All token retrieval attempts failed');
+        return null;
     }, [supabase]);
 
     // Sync user with backend (creates user record if first login)
@@ -112,44 +129,53 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
     // Fetch user's twins
     const refreshTwins = useCallback(async () => {
         console.log('[TwinContext] refreshTwins called');
+        setError(null); // Clear previous error
+
         try {
             const token = await getToken();
 
-            let data = null;
-
-            if (token) {
-                // Try authenticated endpoint
-                console.log('[TwinContext] Trying authenticated /auth/my-twins');
-                const response = await fetch(`${API_URL}/auth/my-twins`, {
-                    headers: {
-                        'Authorization': `Bearer ${token}`
-                    }
-                });
-
-                if (response.ok) {
-                    data = await response.json();
-                } else {
-                    console.warn('Failed to fetch twins from auth endpoint:', response.statusText);
-                }
+            if (!token) {
+                console.error('[TwinContext] No auth token available - user may need to sign in');
+                setError('Authentication required. Please sign in.');
+                return;
             }
 
-            if (data) {
-                // Defensive: handle both raw array and object envelope formats
-                const twinsList = Array.isArray(data) ? data : (data.twins || []);
-                console.log('[TwinContext] Got twins:', twinsList.length);
-                setTwins(twinsList);
-
-                // Set active twin from localStorage or first twin
-                const savedTwinId = localStorage.getItem('activeTwinId');
-                const activeTwinFromList = twinsList.find((t: Twin) => t.id === savedTwinId) || twinsList[0];
-
-                if (activeTwinFromList) {
-                    setActiveTwinState(activeTwinFromList);
-                    localStorage.setItem('activeTwinId', activeTwinFromList.id);
+            // Try authenticated endpoint
+            console.log('[TwinContext] Trying authenticated /auth/my-twins');
+            const response = await fetch(`${API_URL}/auth/my-twins`, {
+                headers: {
+                    'Authorization': `Bearer ${token}`
                 }
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error(`[TwinContext] API error ${response.status}: ${errorText}`);
+                setError(`Failed to fetch twins: ${response.status}`);
+                return;
             }
-        } catch (error) {
-            console.error('Error fetching twins:', error);
+
+            const data = await response.json();
+
+            // Defensive: handle both raw array and object envelope formats
+            const twinsList = Array.isArray(data) ? data : (data.twins || []);
+            console.log('[TwinContext] Got twins:', twinsList.length);
+            setTwins(twinsList);
+
+            // Set active twin from localStorage or first twin
+            const savedTwinId = localStorage.getItem('activeTwinId');
+            const activeTwinFromList = twinsList.find((t: Twin) => t.id === savedTwinId) || twinsList[0];
+
+            if (activeTwinFromList) {
+                setActiveTwinState(activeTwinFromList);
+                localStorage.setItem('activeTwinId', activeTwinFromList.id);
+                console.log('[TwinContext] Active twin set:', activeTwinFromList.id);
+            } else {
+                console.log('[TwinContext] No twins available to set as active');
+            }
+        } catch (err) {
+            console.error('[TwinContext] Error fetching twins:', err);
+            setError('Network error fetching twins');
         }
     }, [API_URL, getToken]);
 
@@ -241,6 +267,7 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
         user,
         isAuthenticated: !!user,
         isLoading,
+        error,  // NEW: Include error state
         twins,
         activeTwin,
         setActiveTwin,

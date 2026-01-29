@@ -143,6 +143,8 @@ def validate_required_env_vars():
 
 # Run validation on import (when app starts)
 validate_required_env_vars()
+print("🚀 FastAPI application initialization sequence complete.")
+
 
 # Startup Logic
 import socket

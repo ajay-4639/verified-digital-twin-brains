@@ -62,6 +62,7 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
     const [activeTwin, setActiveTwinState] = useState<Twin | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [mountId] = useState(() => Math.random().toString(36).substring(7));
 
     // ========================================================================
     // StrictMode + Race Protection Refs
@@ -69,6 +70,7 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
     const initRef = useRef(false);           // Prevents duplicate initialization in StrictMode
     const requestIdRef = useRef(0);          // Race protection: ignore stale responses
     const mountedRef = useRef(true);         // Track mounted state
+    const isHydratedRef = useRef(false);     // Track first successful twin load (prevents transient wipe)
 
     const supabase = getSupabaseClient();
     const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
@@ -135,7 +137,9 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
             if (!token) return null;
 
             const url = `${API_URL}/auth/sync-user`;
-            console.log('[TwinContext] syncUser fetching:', url);
+            const correlationId = Math.random().toString(36).substring(7);
+            console.log(`[TwinContext][${mountId}] syncUser [${correlationId}] fetching:`, url);
+
             const response = await fetch(url, {
                 method: 'POST',
                 headers: {
@@ -144,7 +148,7 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
                 }
             });
 
-            console.log('[TwinContext] syncUser response:', response.status, response.statusText);
+            console.log(`[TwinContext][${mountId}] syncUser [${correlationId}] response:`, response.status, response.statusText);
             if (!response.ok) {
                 console.error('[TwinContext] Failed to sync user:', response.status, response.statusText);
                 return null;
@@ -224,7 +228,9 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
             }
 
             const url = `${API_URL}/auth/my-twins`;
-            console.log('[TwinContext] refreshTwins fetching:', url);
+            const correlationId = Math.random().toString(36).substring(7);
+            console.log(`[TwinContext][${mountId}] refreshTwins [${correlationId}] fetching:`, url);
+
             const response = await fetch(url, {
                 headers: { 'Authorization': `Bearer ${token}` }
             });
@@ -252,26 +258,43 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
                 return;
             }
 
+            // CRITICAL: Only wipe twins if we have NOT hydrated yet (first load)
+            // OR if we genuinely get an empty list after a successful prior load.
+            // This prevents transient failures from wiping existing state.
+            if (twinsList.length === 0 && isHydratedRef.current) {
+                // We already have twins, got empty response - could be transient. 
+                // Keep existing state and log warning.
+                console.warn(`[TwinContext][${mountId}] refreshTwins: Empty response but already hydrated. Keeping existing twins.`);
+                return; // DO NOT wipe state
+            }
+
+            // Mark as hydrated on first successful response (even if empty)
+            if (!isHydratedRef.current) {
+                isHydratedRef.current = true;
+                console.log(`[TwinContext][${mountId}] First hydration complete.`);
+            }
+
             setTwins(twinsList);
 
             // Use stable selection algorithm
-            // CRITICAL: Pass current activeTwin.id from state to preserve selection
             setActiveTwinState(prevActiveTwin => {
                 const selected = selectActiveTwin(twinsList, prevActiveTwin?.id || null);
                 if (selected) {
                     persistTwinId(selected.id);
                 }
-                console.log('[TwinContext] refreshTwins complete. Active:', selected?.id, 'Total:', twinsList.length);
+                console.log(`[TwinContext][${mountId}] refreshTwins complete. Active:`, selected?.id, 'Total:', twinsList.length);
                 return selected;
             });
 
         } catch (err) {
             if (thisRequestId === requestIdRef.current && mountedRef.current) {
                 console.error('[TwinContext] Error fetching twins:', err);
-                setError('Network error fetching twins');
+                // DO NOT set error or wipe state on transient failures
+                // setError('Network error fetching twins'); // REMOVED
+                console.warn(`[TwinContext][${mountId}] Transient error - keeping existing twins state.`);
             }
         }
-    }, [API_URL, getToken, selectActiveTwin, persistTwinId]);
+    }, [API_URL, getToken, selectActiveTwin, persistTwinId, mountId]);
 
     // ========================================================================
     // Set active twin (user action)
@@ -291,59 +314,37 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
     // Initialization (StrictMode-safe)
     // ========================================================================
     useEffect(() => {
+        console.log(`[TwinContext][${mountId}] MOUNTED`);
         mountedRef.current = true;
 
         const initialize = async () => {
-            // StrictMode guard: prevent duplicate initialization
             if (initRef.current) {
-                console.log('[TwinContext] Already initialized, skipping (StrictMode double-invoke)');
+                console.log(`[TwinContext][${mountId}] Already initialized, skipping`);
                 return;
             }
             initRef.current = true;
 
-            console.log('[TwinContext] Starting initialization...');
-            console.log('[TwinContext] API_URL:', API_URL);
+            console.log(`[TwinContext][${mountId}] Starting initialization...`);
             setIsLoading(true);
 
             try {
-                console.log('[TwinContext] Getting session...');
-                const timeoutPromise = new Promise((_, reject) => {
-                    setTimeout(() => reject(new Error('Session timeout')), 15000);
-                });
-
-                let session = null;
-                try {
-                    const result = await Promise.race([
-                        supabase.auth.getSession(),
-                        timeoutPromise
-                    ]) as any;
-                    session = result?.data?.session;
-                    console.log('[TwinContext] Session:', session ? 'exists' : 'null');
-                    if (session?.access_token) {
-                        console.log('[TwinContext] Token present (redacted)');
-                    }
-                } catch (e) {
-                    console.warn('[TwinContext] Session fetch failed:', e);
-                }
+                const { data: { session } } = await supabase.auth.getSession();
+                console.log(`[TwinContext][${mountId}] Initial session:`, session ? `exists (expires: ${new Date(session.expires_at! * 1000).toISOString()})` : 'null');
 
                 if (!mountedRef.current) return;
 
                 if (session?.access_token) {
-                    console.log('[TwinContext] Calling syncUser...');
                     await syncUser();
-                    if (!mountedRef.current) return;
-
-                    console.log('[TwinContext] Calling refreshTwins...');
                     await refreshTwins();
                 } else {
-                    console.log('[TwinContext] No session, user needs to sign in');
+                    console.log(`[TwinContext][${mountId}] No session - prompting sign in`);
                     setError('Please sign in to continue');
                 }
             } catch (error) {
-                console.error('[TwinContext] Initialization error:', error);
+                console.error(`[TwinContext][${mountId}] Initialization error:`, error);
             } finally {
                 if (mountedRef.current) {
-                    console.log('[TwinContext] Initialization complete');
+                    console.log(`[TwinContext][${mountId}] Initialization complete`);
                     setIsLoading(false);
                 }
             }
@@ -351,30 +352,38 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
 
         initialize();
 
-        // Auth state change listener
         const { data: { subscription } } = supabase.auth.onAuthStateChange(
             async (event: AuthChangeEvent, session: Session | null) => {
-                console.log('[TwinContext] Auth state change:', event);
-                if (event === 'SIGNED_IN' && session && mountedRef.current) {
-                    setIsLoading(true);
+                console.log(`[TwinContext][${mountId}] Auth event:`, event, 'Session:', session ? 'exists' : 'null');
+
+                if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && session && mountedRef.current) {
+                    // TOKEN_REFRESHED: Don't set isLoading to avoid UI flicker and re-renders
+                    if (event === 'SIGNED_IN') {
+                        setIsLoading(true);
+                    }
                     await syncUser();
                     await refreshTwins();
-                    if (mountedRef.current) setIsLoading(false);
+                    if (mountedRef.current && event === 'SIGNED_IN') {
+                        setIsLoading(false);
+                    }
                 } else if (event === 'SIGNED_OUT' && mountedRef.current) {
+                    console.warn(`[TwinContext][${mountId}] SIGNED_OUT detected - clearing state`);
                     setUser(null);
                     setTwins([]);
                     setActiveTwinState(null);
                     try { localStorage.removeItem('activeTwinId'); } catch { }
-                    initRef.current = false; // Reset for next sign-in
+                    initRef.current = false;
+                    isHydratedRef.current = false; // Reset hydration on signout
                 }
             }
         );
 
         return () => {
+            console.log(`[TwinContext][${mountId}] UNMOUNTING`);
             mountedRef.current = false;
             subscription.unsubscribe();
         };
-    }, [supabase, syncUser, refreshTwins, API_URL]);
+    }, [supabase, syncUser, refreshTwins, API_URL, mountId]);
 
     const value: TwinContextType = {
         user,

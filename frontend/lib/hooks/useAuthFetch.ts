@@ -47,12 +47,30 @@ export function useAuthFetch() {
             headers['Content-Type'] = 'application/json';
         }
 
+        const correlationId = Math.random().toString(36).substring(7);
         const url = endpoint.startsWith('http') ? endpoint : `${API_BASE_URL}${endpoint}`;
 
-        return fetch(url, {
-            ...options,
-            headers,
-        });
+        console.log(`[useAuthFetch] [${correlationId}] ${options.method || 'GET'} ${url} START (Auth: ${token ? 'Bearer' : 'None'})`);
+        const startTime = Date.now();
+
+        try {
+            const response = await fetch(url, {
+                ...options,
+                headers,
+            });
+            const duration = Date.now() - startTime;
+            console.log(`[useAuthFetch] [${correlationId}] ${options.method || 'GET'} ${url} END [${response.status}] (${duration}ms)`);
+
+            if (response.status === 401 || response.status === 403) {
+                console.warn(`[useAuthFetch] [${correlationId}] AUTH ERROR ${response.status} on ${url}`);
+            }
+
+            return response;
+        } catch (error) {
+            const duration = Date.now() - startTime;
+            console.error(`[useAuthFetch] [${correlationId}] ${url} ERROR after ${duration}ms:`, error);
+            throw error;
+        }
     }, [getAuthToken]);
 
     /**

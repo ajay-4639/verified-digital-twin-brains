@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useTwin } from '@/lib/context/TwinContext';
 import { authFetchStandalone } from '@/lib/hooks/useAuthFetch';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
@@ -47,6 +48,9 @@ export default function DashboardPage() {
   const [recentActivity, setRecentActivity] = useState<ActivityItem[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // Use TwinContext as single source of truth for active twin
+  const { activeTwin, isLoading: twinsLoading } = useTwin();
+
   // Modal states
   const [showConversationsModal, setShowConversationsModal] = useState(false);
   const [showMessagesModal, setShowMessagesModal] = useState(false);
@@ -87,37 +91,20 @@ export default function DashboardPage() {
   };
 
   // Get twin ID and fetch real stats
+  // REFACTORED: Now uses activeTwin from TwinContext instead of redundant fetch
   useEffect(() => {
     const fetchData = async () => {
+      // Wait for TwinContext to hydrate
+      if (twinsLoading) return;
+
       setLoading(true);
+      const currentTwinId = activeTwin?.id || null;
+      setTwinId(currentTwinId);
 
-      // Get active twin ID from localStorage or fetch default
-      let activeTwinId = localStorage.getItem('activeTwinId');
-
-      // If no twin ID, try to get the first twin
-      if (!activeTwinId) {
-        try {
-          const twinsResponse = await authFetchStandalone('/twins');
-          if (twinsResponse.ok) {
-            const twins = await twinsResponse.json();
-            if (twins && twins.length > 0) {
-              activeTwinId = twins[0].id;
-              if (activeTwinId) {
-                localStorage.setItem('activeTwinId', activeTwinId);
-              }
-            }
-          }
-        } catch (error) {
-          console.error('Failed to fetch twins:', error);
-        }
-      }
-
-      setTwinId(activeTwinId);
-
-      if (activeTwinId) {
+      if (currentTwinId) {
         // Fetch real dashboard stats
         try {
-          const statsResponse = await fetch(`${API_BASE_URL}/metrics/dashboard/${activeTwinId}?days=30`);
+          const statsResponse = await fetch(`${API_BASE_URL}/metrics/dashboard/${currentTwinId}?days=30`);
           if (statsResponse.ok) {
             const data = await statsResponse.json();
             setStats({
@@ -136,7 +123,7 @@ export default function DashboardPage() {
 
         // Fetch real activity feed
         try {
-          const activityResponse = await fetch(`${API_BASE_URL}/metrics/activity/${activeTwinId}?limit=5`);
+          const activityResponse = await fetch(`${API_BASE_URL}/metrics/activity/${currentTwinId}?limit=5`);
           if (activityResponse.ok) {
             const data = await activityResponse.json();
             setRecentActivity(data.map((item: any) => ({
@@ -156,7 +143,7 @@ export default function DashboardPage() {
     };
 
     fetchData();
-  }, []);
+  }, [activeTwin?.id, twinsLoading]);
 
 
 

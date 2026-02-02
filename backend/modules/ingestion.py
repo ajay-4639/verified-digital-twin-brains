@@ -14,6 +14,8 @@ from typing import List, Dict, Optional, Any, Tuple
 from modules.transcription import transcribe_audio_multi
 from modules.embeddings import get_embedding
 from PyPDF2 import PdfReader
+import docx
+import openpyxl
 from youtube_transcript_api import YouTubeTranscriptApi
 from modules.clients import get_openai_client, get_pinecone_index
 from modules.observability import supabase, log_ingestion_event
@@ -154,6 +156,30 @@ def extract_text_from_pdf(file_path: str) -> str:
     for page in reader.pages:
         text += page.extract_text()
     return text
+
+
+def extract_text_from_docx(file_path: str) -> str:
+    """Extract text from a Word document."""
+    doc = docx.Document(file_path)
+    text = []
+    for para in doc.paragraphs:
+        text.append(para.text)
+    return "\n".join(text)
+
+
+def extract_text_from_excel(file_path: str) -> str:
+    """Extract text from all sheets in an Excel file."""
+    wb = openpyxl.load_workbook(file_path, data_only=True)
+    text = []
+    for sheet_name in wb.sheetnames:
+        sheet = wb[sheet_name]
+        text.append(f"--- Sheet: {sheet_name} ---")
+        for row in sheet.iter_rows(values_only=True):
+            # Filter out None values and convert to string
+            row_text = [str(cell) for cell in row if cell is not None]
+            if row_text:
+                text.append(" | ".join(row_text))
+    return "\n".join(text)
 
 
 def extract_video_id(url: str) -> str:
@@ -1003,9 +1029,13 @@ async def ingest_source(source_id: str, twin_id: str, file_path: str, filename: 
         log_ingestion_event(source_id, twin_id, "info", f"Duplicate filename detected, removed old sources")
 
 
-    # 1. Extract text (PDF or Audio)
+    # 1. Extract text (PDF, Docx, Excel, or Audio)
     if file_path.endswith('.pdf'):
         text = extract_text_from_pdf(file_path)
+    elif file_path.endswith('.docx'):
+        text = extract_text_from_docx(file_path)
+    elif file_path.endswith('.xlsx'):
+        text = extract_text_from_excel(file_path)
     elif file_path.endswith(('.mp3', '.wav', '.m4a', '.webm')):
         text = await transcribe_audio(file_path)
     else:

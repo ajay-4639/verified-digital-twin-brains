@@ -143,6 +143,10 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                     # Fallback to standard agent
                     is_reasoning_query = False
             
+            print(f"[Chat] Stream started for twin_id={twin_id}, query='{query}'")
+            # Log full query for debugging
+            print(f"[Chat DEBUG] Full Query: {query}")
+            
             if not is_reasoning_query:
                 async for chunk in run_agent_stream(
                     twin_id=twin_id,
@@ -156,6 +160,7 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                         data = chunk["tools"]
                         citations = data.get("citations", citations)
                         confidence_score = data.get("confidence_score", confidence_score)
+                        print(f"[Chat] Tools event: confidence={confidence_score}, citations={len(citations)}")
     
                     # Capture final response from agent (only if has content, not just tool calls)
                     if "agent" in chunk:
@@ -186,12 +191,17 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
             
             # 4. Send final content
             if full_response:
+                print(f"[Chat] Yielding content: {len(full_response)} chars")
                 yield json.dumps({"type": "content", "content": full_response}) + "\n"
             else:
-                yield json.dumps({"type": "content", "content": "I couldn't generate a response."}) + "\n"
+                fallback = "I don't have this specific information in my knowledge base."
+                print(f"[Chat] Fallback emitted: {fallback}")
+                yield json.dumps({"type": "content", "content": fallback}) + "\n"
             
+            print(f"[Chat] Stream ended for twin_id={twin_id}")
+
             # 5. Log conversation
-            if full_response:
+            if full_response or True: # Always log if we reached here
                 # Create conversation if needed
                 if not conversation_id:
                     user_id = user.get("user_id") if user else None
@@ -199,29 +209,35 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                     conversation_id = conv["id"]
                 
                 log_interaction(conversation_id, "user", query)
-                log_interaction(conversation_id, "assistant", full_response, citations, confidence_score)
+                log_interaction(conversation_id, "assistant", full_response or fallback, citations, confidence_score)
             
             # 6. Trigger Scribe (Job Queue for reliability)
-            from modules._core.scribe_engine import enqueue_graph_extraction_job
-            if full_response:
-                # Get tenant_id from user for MemoryEvent audit trail
-                tenant_id = user.get("tenant_id") if user else None
-                # Enqueue graph extraction job (replaces fire-and-forget)
-                job_id = enqueue_graph_extraction_job(
-                    twin_id=twin_id,
-                    user_message=query,
-                    assistant_message=full_response,
-                    history=raw_history,
-                    tenant_id=tenant_id,
-                    conversation_id=conversation_id
-                )
-                if job_id:
-                    print(f"[Chat] Enqueued graph extraction job {job_id} for conversation {conversation_id}")
+            try:
+                from modules._core.scribe_engine import enqueue_graph_extraction_job
+                job_id = None
+                if full_response:
+                    # Get tenant_id from user for MemoryEvent audit trail
+                    tenant_id = user.get("tenant_id") if user else None
+                    # Enqueue graph extraction job (replaces fire-and-forget)
+                    job_id = enqueue_graph_extraction_job(
+                        twin_id=twin_id,
+                        user_message=query,
+                        assistant_message=full_response,
+                        history=raw_history,
+                        tenant_id=tenant_id,
+                        conversation_id=conversation_id
+                    )
+                    if job_id:
+                        print(f"[Chat] Enqueued graph extraction job {job_id} for conversation {conversation_id}")
+            except Exception as se:
+                print(f"[Chat] Scribe enqueue failed (non-blocking): {se}")
 
         except Exception as e:
             import traceback
             traceback.print_exc()
-            yield json.dumps({"type": "error", "error": str(e)}) + "\n"
+            error_msg = f"Error: {str(e)}"
+            print(f"[Chat] ERROR yielded in stream: {error_msg}")
+            yield json.dumps({"type": "error", "error": error_msg}) + "\n"
 
     return StreamingResponse(stream_generator(), media_type="text/event-stream")
 

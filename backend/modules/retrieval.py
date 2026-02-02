@@ -105,9 +105,25 @@ def rrf_merge(results_list: List[List[Dict[str, Any]]], k: int = 60) -> List[Dic
     # Build final results with RRF scores
     final_results = []
     for doc_id, rrf_score in sorted_docs:
-        hit = doc_map[doc_id].copy()
-        hit["rrf_score"] = rrf_score
-        final_results.append(hit)
+        raw_hit = doc_map[doc_id]
+        if raw_hit is None:
+            print(f"DEBUG: doc_id {doc_id} has NONE hit in doc_map")
+            continue
+        
+        try:
+            if hasattr(raw_hit, "to_dict"):
+                hit = raw_hit.to_dict()
+            elif isinstance(raw_hit, dict):
+                hit = raw_hit.copy()
+            else:
+                print(f"DEBUG: doc_id {doc_id} has unknown type {type(raw_hit)}")
+                hit = dict(raw_hit)
+            
+            hit["rrf_score"] = rrf_score
+            final_results.append(hit)
+        except Exception as e:
+            print(f"DEBUG ERROR in rrf_merge loop for doc_id {doc_id}: {e} (type: {type(raw_hit)})")
+            continue
         
     return final_results
 
@@ -264,6 +280,7 @@ def _process_general_matches(merged_general_hits: List[Dict[str, Any]]) -> List[
             "score": match.get("score", 0.0),
             "rrf_score": match.get("rrf_score", 0.0),
             "source_id": match["metadata"].get("source_id", "unknown"),
+            "chunk_id": match["metadata"].get("chunk_id", "unknown"),
             "is_verified": False,
             "category": match["metadata"].get("category", "FACT"),
             "tone": match["metadata"].get("tone", "Neutral"),
@@ -426,7 +443,10 @@ async def retrieve_context_vectors(
     # 7. Deduplicate and limit to top_k
     final_contexts = _deduplicate_and_limit(contexts, top_k)
     
-    print(f"Found {len(final_contexts)} contexts for {twin_id}")
+    print(f"[Retrieval] Found {len(final_contexts)} contexts for twin_id={twin_id} (namespace={twin_id})")
+    if final_contexts:
+        top_scores = [round(c.get("score", 0.0), 3) for c in final_contexts[:3]]
+        print(f"[Retrieval] Top scores: {top_scores}")
     
     # Check if retrieval is too weak - signal for "I don't know" response
     max_score = max([c.get("score", 0.0) for c in final_contexts], default=0.0)

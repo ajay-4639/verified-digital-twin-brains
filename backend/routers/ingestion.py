@@ -56,23 +56,35 @@ async def ingest_x(twin_id: str, request: XThreadIngestRequest, user=Depends(ver
 async def ingest_file_endpoint(
     twin_id: str,
     file: UploadFile = File(...),
+    auto_index: bool = True,
     user=Depends(verify_owner)
 ):
+    """
+    Ingest a file for the specified twin.
+    
+    Args:
+        twin_id: Owner twin ID
+        file: The file to upload
+        auto_index: If True (default), bypasses staging and indexes directly to Pinecone
+    """
     # SECURITY: Verify user owns this twin before ingesting content
     verify_twin_ownership(twin_id, user)
     try:
-        source_id = await ingest_file(twin_id, file)
-        return {"source_id": source_id, "status": "processing"}
+        source_id = await ingest_file(twin_id, file, auto_index=auto_index)
+        status = "live" if auto_index else "staged"
+        return {"source_id": source_id, "status": status}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/ingest/url/{twin_id}")
 async def ingest_url_endpoint(twin_id: str, request: URLIngestRequest, user=Depends(verify_owner)):
+    """Ingest content from URL - auto-detects type (YouTube, X, Podcast, or generic page)."""
     # SECURITY: Verify user owns this twin before ingesting content
     verify_twin_ownership(twin_id, user)
     try:
-        source_id = await ingest_url(twin_id, request.url)
-        return {"source_id": source_id, "status": "processing"}
+        source_id = await ingest_url(twin_id, request.url, auto_index=True)
+        # All URL types now auto-index directly, so status will be live
+        return {"source_id": source_id, "status": "live"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

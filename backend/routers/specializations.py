@@ -1,4 +1,5 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from modules.auth_guard import get_current_user
 import json
 from pathlib import Path
 from modules.specializations import get_specialization
@@ -71,14 +72,18 @@ async def get_specialization_config():
 
 
 @router.get("/twins/{twin_id}/specialization")
-async def get_twin_specialization_config(twin_id: str):
+async def get_twin_specialization_config(twin_id: str, user=Depends(get_current_user)):
     """Get specialization configuration for a specific twin.
     
     This replaces the global /config/specialization endpoint.
     Retrieves the specialization_id from the twins table (defaulting to 'vanilla')
     and returns its configuration.
     """
+    from modules.auth_guard import verify_twin_ownership
     from modules.observability import supabase
+    
+    # SECURITY: Verify user has access to this twin
+    verify_twin_ownership(twin_id, user)
     
     # 1. Get twin's specialization preference
     spec_id = "vanilla"  # Default

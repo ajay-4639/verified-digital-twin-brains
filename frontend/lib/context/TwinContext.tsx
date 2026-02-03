@@ -33,12 +33,17 @@ export interface UserProfile {
     role?: 'owner' | 'viewer' | string;  // owner = admin, viewer = standard user
 }
 
+type SyncStatus = 'idle' | 'syncing' | 'ok' | 'retrying' | 'error' | 'account-deleted';
+
 interface TwinContextType {
     // User state
     user: UserProfile | null;
     isAuthenticated: boolean;
     isLoading: boolean;
     error: string | null;  // NEW: Explicit error state
+    syncStatus: SyncStatus;
+    syncMessage: string | null;
+    syncRetryAt: number | null;
 
     // Twin state
     twins: Twin[];
@@ -63,6 +68,9 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
     const [activeTwin, setActiveTwinState] = useState<Twin | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
+    const [syncMessage, setSyncMessage] = useState<string | null>(null);
+    const [syncRetryAt, setSyncRetryAt] = useState<number | null>(null);
     const [mountId] = useState(() => Math.random().toString(36).substring(7));
 
     // ========================================================================
@@ -73,9 +81,22 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
     const mountedRef = useRef(true);         // Track mounted state
     const isHydratedRef = useRef(false);     // Track first successful twin load (prevents transient wipe)
     const tokenRef = useRef<string | null>(null); // In-memory token cache to prevent getSession race
+    const syncInFlightRef = useRef<Promise<UserProfile | null> | null>(null);
+    const syncAttemptRef = useRef(0);
+    const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const lastGoodUserRef = useRef<UserProfile | null>(null);
+    const syncTimelineRef = useRef<Array<{ ts: string; event: string; detail?: Record<string, unknown> }>>([]);
+    const syncExternalInFlightRef = useRef(false);
+    const syncChannelRef = useRef<BroadcastChannel | null>(null);
+    const sessionUserIdRef = useRef<string | null>(null);
 
     const supabase = getSupabaseClient();
     const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+    const SYNC_TIMEOUT_MS = 8000;
+    const SYNC_RETRY_BASE_MS = 1000;
+    const SYNC_RETRY_MAX_MS = 30000;
+    const SYNC_RETRY_MAX_ATTEMPTS = 5;
+    const SYNC_CACHE_KEY = 'cachedUserProfile';
 
     // ========================================================================
     // Stable localStorage helpers
@@ -96,6 +117,49 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
             }
         } catch {
             // localStorage unavailable
+        }
+    }, []);
+
+    const logSyncEvent = useCallback((event: string, detail?: Record<string, unknown>) => {
+        const entry = { ts: new Date().toISOString(), event, detail };
+        syncTimelineRef.current.push(entry);
+        if (syncTimelineRef.current.length > 50) {
+            syncTimelineRef.current.shift();
+        }
+        try {
+            if (typeof window !== 'undefined') {
+                (window as any).__SYNC_USER_TIMELINE__ = syncTimelineRef.current;
+            }
+        } catch {
+            // ignore
+        }
+        console.log(`[TwinContext][${mountId}] syncUser ${event}`, detail || {});
+    }, [mountId]);
+
+    const loadCachedUser = useCallback((sessionUserId?: string): UserProfile | null => {
+        try {
+            if (typeof window === 'undefined') return null;
+            const raw = localStorage.getItem(SYNC_CACHE_KEY);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw) as UserProfile | null;
+            if (!parsed?.id) return null;
+            if (sessionUserId && parsed.id !== sessionUserId) return null;
+            return parsed;
+        } catch {
+            return null;
+        }
+    }, []);
+
+    const persistCachedUser = useCallback((profile: UserProfile | null) => {
+        try {
+            if (typeof window === 'undefined') return;
+            if (!profile) {
+                localStorage.removeItem(SYNC_CACHE_KEY);
+                return;
+            }
+            localStorage.setItem(SYNC_CACHE_KEY, JSON.stringify(profile));
+        } catch {
+            // ignore
         }
     }, []);
 
@@ -139,11 +203,59 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
     }, [supabase]);
 
     // Sync user with backend
+    const scheduleSyncRetry = useCallback((reason: string, token: string | undefined, retryFn: (token?: string) => void) => {
+        if (syncAttemptRef.current >= SYNC_RETRY_MAX_ATTEMPTS) {
+            setSyncStatus('error');
+            setSyncMessage('Sync paused. Please check your connection.');
+            setSyncRetryAt(null);
+            logSyncEvent('retry_exhausted', { reason });
+            return;
+        }
+
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+            setSyncStatus('retrying');
+            setSyncMessage('You are offline. Sync will resume when you reconnect.');
+            setSyncRetryAt(null);
+            logSyncEvent('retry_offline', { reason });
+            return;
+        }
+
+        syncAttemptRef.current += 1;
+        const attempt = syncAttemptRef.current;
+        const baseDelay = Math.min(SYNC_RETRY_MAX_MS, SYNC_RETRY_BASE_MS * 2 ** (attempt - 1));
+        const jitter = Math.floor(Math.random() * 250);
+        const delay = baseDelay + jitter;
+        const retryAt = Date.now() + delay;
+
+        setSyncStatus('retrying');
+        setSyncMessage(`Sync temporarily unavailable. Retrying in ${Math.ceil(delay / 1000)}s.`);
+        setSyncRetryAt(retryAt);
+        logSyncEvent('retry_scheduled', { reason, attempt, delay });
+
+        if (syncTimerRef.current) {
+            clearTimeout(syncTimerRef.current);
+        }
+        syncTimerRef.current = setTimeout(() => {
+            retryFn(token);
+        }, delay);
+    }, [logSyncEvent]);
+
     const syncUser = useCallback(async (providedToken?: string): Promise<UserProfile | null> => {
-        try {
-            const token = providedToken || await getToken();
+        if (syncExternalInFlightRef.current) {
+            logSyncEvent('sync_skipped_external_inflight');
+            return lastGoodUserRef.current;
+        }
+        if (syncInFlightRef.current) {
+            logSyncEvent('sync_deduped');
+            return syncInFlightRef.current;
+        }
+
+        const runSync = (async () => {
+            let token = providedToken || await getToken();
             if (!token) {
-                console.warn('[TwinContext] syncUser: No token available');
+                logSyncEvent('sync_no_token');
+                setSyncStatus('error');
+                setSyncMessage('Authentication required. Please sign in again.');
                 return null;
             }
 
@@ -152,32 +264,152 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
 
             const url = `${API_URL}/auth/sync-user`;
             const correlationId = Math.random().toString(36).substring(7);
-            console.log(`[TwinContext][${mountId}] syncUser [${correlationId}] fetching:`, url);
+            const attempt = syncAttemptRef.current + 1;
+            setSyncStatus(attempt > 1 ? 'retrying' : 'syncing');
+            setSyncMessage(attempt > 1 ? `Sync retry ${attempt}...` : null);
+            logSyncEvent('sync_start', { correlationId, attempt });
+            syncChannelRef.current?.postMessage({ type: 'sync-start', correlationId, ts: Date.now() });
 
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json'
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), SYNC_TIMEOUT_MS);
+
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json',
+                        'X-Correlation-Id': correlationId,
+                        'X-Client-Time': new Date().toISOString()
+                    },
+                    signal: controller.signal
+                });
+
+                clearTimeout(timeoutId);
+                logSyncEvent('sync_response', { correlationId, status: response.status });
+
+                if (response.status === 401) {
+                    const errorText = await response.text();
+                    if (errorText.toLowerCase().includes('account has been deleted')) {
+                        setSyncStatus('account-deleted');
+                        setSyncMessage('Account deleted. Redirecting...');
+                        logSyncEvent('account_deleted', { correlationId });
+                        try {
+                            await supabase.auth.signOut();
+                        } catch {
+                            // ignore
+                        }
+                        if (mountedRef.current) {
+                            setUser(null);
+                            setTwins([]);
+                            setActiveTwinState(null);
+                            persistCachedUser(null);
+                            try { localStorage.removeItem('activeTwinId'); } catch { }
+                        }
+                        try {
+                            if (typeof window !== 'undefined') {
+                                window.location.assign('/auth/login?reason=account_deleted');
+                            }
+                        } catch {
+                            // ignore
+                        }
+                        syncChannelRef.current?.postMessage({ type: 'sync-end', correlationId, ts: Date.now() });
+                        return null;
+                    }
+
+                    setSyncStatus('error');
+                    setSyncMessage('Session expired. Please sign in again.');
+                    logSyncEvent('sync_auth_error', { correlationId, detail: errorText.slice(0, 200) });
+                    syncChannelRef.current?.postMessage({ type: 'sync-end', correlationId, ts: Date.now() });
+                    return null;
                 }
-            });
 
-            console.log(`[TwinContext][${mountId}] syncUser [${correlationId}] response:`, response.status, response.statusText);
-            if (!response.ok) {
-                console.error('[TwinContext] Failed to sync user:', response.status, response.statusText);
-                return null;
-            }
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    logSyncEvent('sync_http_error', { correlationId, status: response.status, detail: errorText.slice(0, 200) });
+                    scheduleSyncRetry(`HTTP ${response.status}`, token, syncUser);
+                    syncChannelRef.current?.postMessage({ type: 'sync-end', correlationId, ts: Date.now() });
+                    return lastGoodUserRef.current;
+                }
 
-            const data = await response.json();
-            if (mountedRef.current) {
-                setUser(data.user);
+                const data = await response.json();
+                const nextUser: UserProfile | null = data?.user && data.user.id ? data.user : null;
+                if (nextUser && mountedRef.current) {
+                    setUser(nextUser);
+                    lastGoodUserRef.current = nextUser;
+                    persistCachedUser(nextUser);
+                }
+                if (nextUser) {
+                    syncChannelRef.current?.postMessage({ type: 'sync-success', correlationId, ts: Date.now(), user: nextUser });
+                }
+
+                setSyncStatus('ok');
+                setSyncMessage(null);
+                setSyncRetryAt(null);
+                syncAttemptRef.current = 0;
+                logSyncEvent('sync_success', { correlationId });
+                syncChannelRef.current?.postMessage({ type: 'sync-end', correlationId, ts: Date.now() });
+                return nextUser || lastGoodUserRef.current;
+            } catch (error: any) {
+                clearTimeout(timeoutId);
+                const isAbort = error?.name === 'AbortError';
+                logSyncEvent('sync_error', { correlationId, isAbort, message: error?.message || 'unknown' });
+                scheduleSyncRetry(isAbort ? 'timeout' : 'network', token || undefined, syncUser);
+                syncChannelRef.current?.postMessage({ type: 'sync-end', correlationId, ts: Date.now() });
+                return lastGoodUserRef.current;
             }
-            return data.user;
-        } catch (error) {
-            console.error('[TwinContext] Error syncing user (network?):', error);
-            return null;
+        })();
+
+        syncInFlightRef.current = runSync;
+        try {
+            return await runSync;
+        } finally {
+            syncInFlightRef.current = null;
         }
-    }, [API_URL, getToken]);
+    }, [API_URL, getToken, logSyncEvent, persistCachedUser, scheduleSyncRetry, supabase]);
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        if (typeof BroadcastChannel === 'undefined') return;
+
+        const channel = new BroadcastChannel('sync-user');
+        syncChannelRef.current = channel;
+
+        channel.onmessage = (event) => {
+            const data = event.data || {};
+            if (data.type === 'sync-start') {
+                syncExternalInFlightRef.current = true;
+                return;
+            }
+            if (data.type === 'sync-end') {
+                syncExternalInFlightRef.current = false;
+                return;
+            }
+            if (data.type === 'sync-success' && data.user?.id && sessionUserIdRef.current === data.user.id) {
+                setUser(data.user);
+                lastGoodUserRef.current = data.user;
+                persistCachedUser(data.user);
+                setSyncStatus('ok');
+                setSyncMessage(null);
+                setSyncRetryAt(null);
+            }
+        };
+
+        return () => {
+            channel.close();
+            syncChannelRef.current = null;
+        };
+    }, [persistCachedUser]);
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        const handleOnline = () => {
+            logSyncEvent('online');
+            syncUser(tokenRef.current || undefined);
+        };
+        window.addEventListener('online', handleOnline);
+        return () => window.removeEventListener('online', handleOnline);
+    }, [logSyncEvent, syncUser]);
 
     // ========================================================================
     // Stable Selection Algorithm
@@ -357,12 +589,18 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
             try {
                 const { data: { session } } = await supabase.auth.getSession();
                 console.log(`[TwinContext][${mountId}] Initial session:`, session ? `exists (expires: ${new Date(session.expires_at! * 1000).toISOString()})` : 'null');
+                sessionUserIdRef.current = session?.user?.id || null;
 
                 if (!mountedRef.current) return;
 
                 if (session?.access_token) {
                     tokenRef.current = session.access_token;
-                    await syncUser(session.access_token);
+                    const cachedUser = loadCachedUser(session.user.id);
+                    if (cachedUser && mountedRef.current) {
+                        setUser(cachedUser);
+                        lastGoodUserRef.current = cachedUser;
+                    }
+                    syncUser(session.access_token);
                     await refreshTwins(session.access_token);
                 } else {
                     console.log(`[TwinContext][${mountId}] No session - prompting sign in`);
@@ -388,12 +626,13 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
                     console.log(`[TwinContext][${mountId}] Syncing for event: ${event}`);
                     // Update cache immediately to prevent raciness
                     tokenRef.current = session.access_token;
+                    sessionUserIdRef.current = session.user?.id || null;
 
                     // TOKEN_REFRESHED: Don't set isLoading to avoid UI flicker and re-renders
                     if (event === 'SIGNED_IN') {
                         setIsLoading(true);
                     }
-                    await syncUser(session.access_token);
+                    syncUser(session.access_token);
                     await refreshTwins(session.access_token);
                     if (mountedRef.current && event === 'SIGNED_IN') {
                         setIsLoading(false);
@@ -401,9 +640,14 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
                 } else if (event === 'SIGNED_OUT' && mountedRef.current) {
                     console.warn(`[TwinContext][${mountId}] SIGNED_OUT detected - clearing state`);
                     tokenRef.current = null; // Clear cache
+                    sessionUserIdRef.current = null;
                     setUser(null);
                     setTwins([]);
                     setActiveTwinState(null);
+                    setSyncStatus('idle');
+                    setSyncMessage(null);
+                    setSyncRetryAt(null);
+                    persistCachedUser(null);
                     try { localStorage.removeItem('activeTwinId'); } catch { }
                     initRef.current = false;
                     isHydratedRef.current = false; // Reset hydration on signout
@@ -415,14 +659,21 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
             console.log(`[TwinContext][${mountId}] UNMOUNTING`);
             mountedRef.current = false;
             subscription.unsubscribe();
+            if (syncTimerRef.current) {
+                clearTimeout(syncTimerRef.current);
+                syncTimerRef.current = null;
+            }
         };
-    }, [supabase, syncUser, refreshTwins, API_URL, mountId]);
+    }, [supabase, syncUser, refreshTwins, API_URL, mountId, loadCachedUser, persistCachedUser]);
 
     const value: TwinContextType = {
         user,
         isAuthenticated: !!user,
         isLoading,
         error,
+        syncStatus,
+        syncMessage,
+        syncRetryAt,
         twins,
         activeTwin,
         setActiveTwin,

@@ -3,6 +3,7 @@
 import React from 'react';
 import Sidebar from '@/components/Sidebar';
 import { ToastProvider } from '@/components/ui';
+import SyncStatusBanner from '@/components/ui/SyncStatusBanner';
 import { TwinProvider } from '@/lib/context/TwinContext';
 
 /**
@@ -30,6 +31,7 @@ export default function DashboardLayout({
           <Sidebar />
           <main className="flex-1 overflow-y-auto relative">
             <div className="max-w-6xl mx-auto p-8">
+              <SyncStatusBanner />
               {children}
             </div>
           </main>

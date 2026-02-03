@@ -57,10 +57,13 @@ app.add_middleware(
 @app.middleware("http")
 async def log_requests(request, call_next):
     start_time = time.time()
+    correlation_id = request.headers.get("x-correlation-id") or request.headers.get("x-request-id")
     response = await call_next(request)
     duration = time.time() - start_time
+    if correlation_id:
+        response.headers["x-correlation-id"] = correlation_id
     # Use standard print for immediate visibility in Render logs
-    print(f"DEBUG: {request.method} {request.url.path} - {response.status_code} ({duration:.3f}s) UA: {request.headers.get('user-agent')}")
+    print(f"DEBUG: {request.method} {request.url.path} - {response.status_code} ({duration:.3f}s) corr={correlation_id or 'none'} UA: {request.headers.get('user-agent')}")
     sys.stdout.flush()
     return response
 

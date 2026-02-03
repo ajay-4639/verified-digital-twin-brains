@@ -159,15 +159,23 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                     conversation_id=conversation_id
                 ).__aiter__()
 
+                pending_task = None
                 while True:
-                    try:
-                        chunk = await asyncio.wait_for(agent_iter.__anext__(), timeout=10)
-                    except asyncio.TimeoutError:
+                    if pending_task is None:
+                        pending_task = asyncio.create_task(agent_iter.__anext__())
+
+                    done, _ = await asyncio.wait({pending_task}, timeout=10)
+                    if not done:
                         # Keep the SSE stream alive while the agent is still thinking.
                         yield json.dumps({"type": "ping"}) + "\n"
                         continue
+
+                    try:
+                        chunk = pending_task.result()
                     except StopAsyncIteration:
                         break
+                    finally:
+                        pending_task = None
 
                     # Capture metadata from tools
                     if "tools" in chunk:

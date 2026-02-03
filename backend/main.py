@@ -70,6 +70,7 @@ app.include_router(chat.router)
 app.include_router(ingestion.router)
 app.include_router(youtube_preflight.router)
 app.include_router(twins.router)
+
 app.include_router(actions.router)
 app.include_router(knowledge.router)
 app.include_router(sources.router)
@@ -90,6 +91,8 @@ app.include_router(interview.router)
 app.include_router(api_keys.router)
 app.include_router(debug_retrieval.router)
 app.include_router(verify.router)
+
+
 
 # Conditional VC Routes (only if explicitly enabled)
 # VC routes are conditionally loaded to prevent VC files from interfering
@@ -170,30 +173,22 @@ def print_startup_banner():
     """Print the startup banner with environment info."""
     port = os.getenv("PORT", "8000")
     spec = get_specialization()
-    banner = f"""
-╔══════════════════════════════════════════════════════════════╗
-║                                                              ║
-║   🧠  VERIFIED DIGITAL TWIN BRAIN                            ║
-║                                                              ║
-║   Specialization: {spec.display_name:<40} ║
-║   Mode:           {spec.name:<40} ║
-║   Port:           {port:<40} ║
-║   Status:         INITIALIZING...                            ║
-║                                                              ║
-╚══════════════════════════════════════════════════════════════╝
-"""
-    print(banner)
+    print("Starting Verified Digital Twin Brain...")
+    print(f"Specialization: {spec.display_name}")
+    print(f"Mode:           {spec.name}")
+    print(f"Port:           {port}")
+    print("Status:         INITIALIZING...")
     sys.stdout.flush()
 
 # Run validation on import (when app starts)
 print_startup_banner()
 validate_required_env_vars()
-print(f"🚀 FastAPI initialization complete. Bound to PORT: {os.getenv('PORT', '8000')}")
+print(f"FastAPI initialization complete. Bound to PORT: {os.getenv('PORT', '8000')}")
 sys.stdout.flush()
 
 @app.on_event("startup")
 async def startup_event():
-    print("✅ READY: Event loop running, accepting traffic.")
+    print("READY: Event loop running, accepting traffic.")
     print(f"DEBUG: Listening for Probes on: http://0.0.0.0:{os.getenv('PORT', '8000')}")
     sys.stdout.flush()
 
@@ -219,21 +214,12 @@ if __name__ == "__main__":
         print(f"Please kill the process using this port or set a different port via the PORT environment variable.")
     else:
         # Startup banner with specialization info
-        banner = f"""
-╔══════════════════════════════════════════════════════════════╗
-║                                                              ║
-║   🧠  VERIFIED DIGITAL TWIN BRAIN                            ║
-║                                                              ║
-║   Specialization: {spec.display_name:<40} ║
-║   Mode:           {spec.name:<40} ║
-║   Port:           {port:<40} ║
-║                                                              ║
-║   API:      http://localhost:{port:<27} ║
-║   Docs:     http://localhost:{port}/docs{' ' * 22} ║
-║   Config:   http://localhost:{port}/config/specialization{' ' * 5} ║
-║                                                              ║
-╚══════════════════════════════════════════════════════════════╝
-"""
-        print(banner)
+        print("-" * 60)
+        print("Verified Digital Twin Brain API")
+        print(f"Specialization: {spec.display_name}")
+        print(f"Mode:           {spec.name}")
+        print(f"Port:           {port}")
+        print(f"API Docs:       http://localhost:{port}/docs")
+        print("-" * 60)
         
         uvicorn.run(app, host=host, port=port)

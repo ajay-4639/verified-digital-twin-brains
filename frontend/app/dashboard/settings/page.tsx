@@ -1,8 +1,10 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { getSupabaseClient } from '@/lib/supabase/client';
 import { useTwin } from '@/lib/context/TwinContext';
+import DeleteTwinModal from '@/components/ui/DeleteTwinModal';
 
 interface UserProfile {
   name: string;
@@ -30,6 +32,8 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const router = useRouter();
 
   // Empty defaults - will be populated from activeTwin
   const [profile, setProfile] = useState<UserProfile>({
@@ -133,6 +137,41 @@ export default function SettingsPage() {
     } finally {
       setSaving(false);
     }
+  };
+
+  // Delete twin handler
+  const handleDeleteTwin = async (permanent: boolean): Promise<void> => {
+    if (!activeTwin) throw new Error('No active twin');
+
+    const token = await getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+
+    // Use archive endpoint for soft delete, DELETE with ?hard=true for permanent
+    const url = permanent
+      ? `${API_URL}/twins/${activeTwin.id}?hard=true`
+      : `${API_URL}/twins/${activeTwin.id}/archive`;
+    const method = permanent ? 'DELETE' : 'POST';
+
+    const response = await fetch(url, {
+      method,
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+      throw new Error(errorData.detail || 'Failed to delete twin');
+    }
+
+    console.log('[Settings] Twin deleted successfully, refreshing...');
+
+    // Refresh the twins list - this will clear the deleted twin
+    await refreshTwins();
+
+    // Navigate away since this twin no longer exists
+    router.push('/dashboard');
   };
 
   const tabs = [
@@ -417,9 +456,12 @@ export default function SettingsPage() {
             <div className="p-4 border border-red-200 rounded-xl flex items-center justify-between">
               <div>
                 <p className="font-medium text-slate-900">Delete Twin</p>
-                <p className="text-sm text-slate-500">Permanently delete your digital twin</p>
+                <p className="text-sm text-slate-500">Archive or permanently delete your digital twin</p>
               </div>
-              <button className="px-4 py-2 bg-red-500 text-white font-medium text-sm rounded-xl hover:bg-red-600 transition-colors">
+              <button
+                onClick={() => setShowDeleteModal(true)}
+                className="px-4 py-2 bg-red-500 text-white font-medium text-sm rounded-xl hover:bg-red-600 transition-colors"
+              >
                 Delete
               </button>
             </div>
@@ -451,6 +493,15 @@ export default function SettingsPage() {
           </button>
         </div>
       )}
+
+      {/* Delete Twin Modal */}
+      <DeleteTwinModal
+        isOpen={showDeleteModal}
+        onClose={() => setShowDeleteModal(false)}
+        onDelete={handleDeleteTwin}
+        twinName={activeTwin?.name || ''}
+        twinId={activeTwin?.id || ''}
+      />
     </div>
   );
 }

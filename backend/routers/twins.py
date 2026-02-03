@@ -18,6 +18,9 @@ from modules.observability import supabase
 from modules.specializations import get_specialization, get_all_specializations
 from modules.clients import get_pinecone_index
 from modules.graph_context import get_graph_stats
+from modules.governance import AuditLogger
+from datetime import datetime
+
 
 
 router = APIRouter(tags=["twins"])
@@ -35,9 +38,19 @@ class TwinCreateRequest(BaseModel):
     settings: Optional[Dict[str, Any]] = None
 
 
+class DeleteTwinResponse(BaseModel):
+    """Response for archive/delete twin operations."""
+    status: str  # "archived" | "deleted" | "already_archived" | "not_found"
+    twin_id: str
+    deleted_at: Optional[str] = None
+    cleanup_status: str = "done"  # "done" | "pending"
+    message: Optional[str] = None
+
+
 # ============================================================================
 # Specialization Endpoints
 # ============================================================================
+
 
 @router.get("/specializations")
 async def list_specializations():
@@ -99,17 +112,22 @@ async def create_twin(request: TwinCreateRequest, user=Depends(get_current_user)
 
 @router.get("/twins")
 async def list_twins(user=Depends(get_current_user)):
-    """List all twins for the authenticated user's tenant."""
+    """List all twins for the authenticated user's tenant (excludes archived)."""
     try:
         tenant_id = user.get("tenant_id")
         if not tenant_id:
             # User has no tenant - return empty list (not an error)
             return []
         
-        # Get twins where tenant_id matches user's tenant
-        response = supabase.table("twins").select("*").eq("tenant_id", tenant_id).order("created_at", desc=True).execute()
+        # Get twins where tenant_id matches user's tenant AND not archived
+        # is_active=false indicates archived twin
+        response = supabase.table("twins").select("*").eq("tenant_id", tenant_id).neq("is_active", False).order("created_at", desc=True).execute()
         
         twins_list = response.data if response.data else []
+        
+        # Additional filter: exclude any with deleted_at in settings (belt and suspenders)
+        twins_list = [t for t in twins_list if not (t.get("settings") or {}).get("deleted_at")]
+        
         print(f"[TWINS] Listing twins for tenant {tenant_id}: found {len(twins_list)}")
         
         return twins_list
@@ -564,3 +582,214 @@ async def list_group_overrides(group_id: str, user=Depends(get_current_user)):
         return overrides
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Twin Deletion Endpoints
+# ============================================================================
+
+@router.post("/twins/{twin_id}/archive", response_model=DeleteTwinResponse)
+async def archive_twin(twin_id: str, user=Depends(verify_owner)):
+    """
+    Archive (soft delete) a twin.
+    
+    - Marks twin as deleted (stores deleted_at in settings)
+    - Revokes publish status
+    - Twin will no longer appear in lists
+    - Idempotent: returns success if already archived
+    """
+    # Verify ownership
+    verify_twin_ownership(twin_id, user)
+    
+    tenant_id = user.get("tenant_id")
+    user_id = user.get("user_id")
+    
+    try:
+        # Check if twin exists
+        twin_res = supabase.table("twins").select("id, name, settings").eq("id", twin_id).single().execute()
+        
+        if not twin_res.data:
+            return DeleteTwinResponse(
+                status="not_found",
+                twin_id=twin_id,
+                message="Twin not found"
+            )
+        
+        twin_data = twin_res.data
+        current_settings = twin_data.get("settings") or {}
+        
+        # Check if already archived
+        if current_settings.get("deleted_at"):
+            return DeleteTwinResponse(
+                status="already_archived",
+                twin_id=twin_id,
+                deleted_at=current_settings["deleted_at"],
+                message="Twin was already archived"
+            )
+        
+        # Perform soft delete
+        now = datetime.utcnow().isoformat()
+        
+        # Update settings with deletion info + revoke publish
+        current_settings["deleted_at"] = now
+        current_settings["deleted_by"] = user_id
+        current_settings["is_public"] = False
+        if "widget_settings" in current_settings:
+            current_settings["widget_settings"]["public_share_enabled"] = False
+        
+        supabase.table("twins").update({
+            "settings": current_settings,
+            "is_active": False  # Disable twin
+        }).eq("id", twin_id).execute()
+        
+        # Log the archive action
+        AuditLogger.log(
+            tenant_id=tenant_id,
+            twin_id=twin_id,
+            event_type="CONFIGURATION_CHANGE",
+            action="TWIN_ARCHIVED",
+            actor_id=user_id,
+            metadata={"twin_name": twin_data.get("name")}
+        )
+        
+        print(f"[TWINS] Archived twin {twin_id} by user {user_id}")
+        
+        return DeleteTwinResponse(
+            status="archived",
+            twin_id=twin_id,
+            deleted_at=now,
+            cleanup_status="done",
+            message="Twin archived successfully"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[TWINS] Error archiving twin: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+@router.delete("/twins/{twin_id}", response_model=DeleteTwinResponse)
+async def delete_twin(
+    twin_id: str, 
+    hard: bool = Query(False, description="If true, permanently delete twin and all data"),
+    user=Depends(verify_owner)
+):
+    """
+    Delete a twin.
+    
+    Without ?hard=true: Same as archive (soft delete)
+    With ?hard=true: Permanently delete twin and all associated data
+    
+    Hard delete will:
+    - Delete all database records (cascade)
+    - Clear Pinecone namespace
+    - This action cannot be undone
+    
+    Idempotent: repeated calls are safe
+    """
+    # Verify ownership
+    verify_twin_ownership(twin_id, user)
+    
+    tenant_id = user.get("tenant_id")
+    user_id = user.get("user_id")
+    
+    # If not hard delete, just archive
+    if not hard:
+        return await archive_twin(twin_id, user)
+    
+    try:
+        # Check if twin exists
+        twin_res = supabase.table("twins").select("id, name, settings, tenant_id").eq("id", twin_id).single().execute()
+        
+        if not twin_res.data:
+            # Already deleted or never existed - idempotent success
+            return DeleteTwinResponse(
+                status="deleted",
+                twin_id=twin_id,
+                message="Twin not found (already deleted or never existed)"
+            )
+        
+        twin_data = twin_res.data
+        twin_name = twin_data.get("name", "Unknown")
+        
+        # Extra security check: verify tenant match
+        if twin_data.get("tenant_id") != tenant_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        cleanup_status = "done"
+        
+        # 1. Delete Pinecone namespace
+        try:
+            index = get_pinecone_index()
+            # Delete all vectors in the twin's namespace
+            index.delete(delete_all=True, namespace=twin_id)
+            print(f"[TWINS] Cleared Pinecone namespace for twin {twin_id}")
+        except Exception as e:
+            print(f"[TWINS] Warning: Failed to clear Pinecone namespace: {e}")
+            # Mark as pending cleanup but continue with DB deletion
+            cleanup_status = "pending"
+        
+        # 2. Log BEFORE deleting (since audit log references twin_id)
+        AuditLogger.log(
+            tenant_id=tenant_id,
+            twin_id=twin_id,
+            event_type="CONFIGURATION_CHANGE",
+            action="TWIN_DELETED",
+            actor_id=user_id,
+            metadata={
+                "twin_name": twin_name,
+                "hard_delete": True,
+                "cleanup_status": cleanup_status
+            }
+        )
+        
+        # 3. Delete twin from database (CASCADE handles related tables)
+        supabase.table("twins").delete().eq("id", twin_id).execute()
+        
+        print(f"[TWINS] Hard deleted twin {twin_id} by user {user_id}")
+        
+        return DeleteTwinResponse(
+            status="deleted",
+            twin_id=twin_id,
+            deleted_at=datetime.utcnow().isoformat(),
+            cleanup_status=cleanup_status,
+            message="Twin permanently deleted" + (" (Pinecone cleanup pending)" if cleanup_status == "pending" else "")
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[TWINS] Error deleting twin: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def is_twin_deleted(twin_id: str) -> bool:
+    """
+    Check if a twin is archived/deleted.
+    
+    Use this helper in chat/retrieval/verify endpoints to block access.
+    Returns True if twin is deleted, False if active.
+    """
+    try:
+        twin_res = supabase.table("twins").select("settings, is_active").eq("id", twin_id).single().execute()
+        
+        if not twin_res.data:
+            return True  # Not found = treat as deleted
+        
+        settings = twin_res.data.get("settings") or {}
+        is_active = twin_res.data.get("is_active", True)
+        
+        # Check for soft delete marker
+        if settings.get("deleted_at"):
+            return True
+        
+        # Check is_active flag
+        if not is_active:
+            return True
+        
+        return False
+    except Exception:
+        return False  # On error, don't block (fail open for availability)
+

@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
+import { useTwin } from '@/lib/context/TwinContext';
 import { TwinSelector } from './ui/TwinSelector';
 import { createClient } from '@/lib/supabase/client';
 import { SIDEBAR_CONFIG, APP_NAME, APP_TAGLINE } from '@/lib/navigation/config';
@@ -41,21 +42,12 @@ function getIcon(name: string) {
 export default function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
+  const { activeTwin, setActiveTwin } = useTwin();
   const [collapsed, setCollapsed] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
-  const [activeTwinId, setActiveTwinId] = useState<string | null>(null);
-
-  // Load active twin from localStorage on mount
-  useEffect(() => {
-    const storedTwinId = localStorage.getItem('activeTwinId');
-    if (storedTwinId) {
-      setActiveTwinId(storedTwinId);
-    }
-  }, []);
 
   const handleTwinChange = (twinId: string) => {
-    setActiveTwinId(twinId);
-    localStorage.setItem('activeTwinId', twinId);
+    setActiveTwin(twinId);
   };
 
   const handleLogout = async () => {
@@ -91,10 +83,7 @@ export default function Sidebar() {
       {/* Twin Selector */}
       {!collapsed && (
         <div className="relative border-b border-slate-800/50">
-          <TwinSelector
-            activeTwinId={activeTwinId}
-            onTwinChange={handleTwinChange}
-          />
+          <TwinSelector />
         </div>
       )}
 

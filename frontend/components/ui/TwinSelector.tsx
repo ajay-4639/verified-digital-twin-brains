@@ -6,11 +6,6 @@ import { useTwin } from '@/lib/context/TwinContext';
 
 
 
-interface TwinSelectorProps {
-    activeTwinId: string | null;
-    onTwinChange: (twinId: string) => void;
-}
-
 const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
 
 // Specialization icons
@@ -18,10 +13,7 @@ const SPEC_ICONS: Record<string, string> = {
     vanilla: '🧠',
 };
 
-export const TwinSelector: React.FC<TwinSelectorProps> = ({
-    activeTwinId,
-    onTwinChange
-}) => {
+export const TwinSelector: React.FC = () => {
     const router = useRouter();
     const { twins, isLoading: loading, setActiveTwin, activeTwin } = useTwin();
     const [isOpen, setIsOpen] = useState(false);
@@ -29,8 +21,7 @@ export const TwinSelector: React.FC<TwinSelectorProps> = ({
 
     // Derived: current twin from the context list
     // Handle case where context might still be hydrating
-    const currentTwin = twins?.find?.(t => t.id === activeTwinId) || activeTwin;
-
+    const currentTwin = activeTwin;
 
     // Close dropdown when clicking outside
     useEffect(() => {
@@ -44,11 +35,8 @@ export const TwinSelector: React.FC<TwinSelectorProps> = ({
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
-
-
     const handleTwinSelect = (twinId: string) => {
         setActiveTwin(twinId);
-        onTwinChange(twinId);
         setIsOpen(false);
     };
 
@@ -122,17 +110,17 @@ export const TwinSelector: React.FC<TwinSelectorProps> = ({
                             <button
                                 key={twin.id}
                                 onClick={() => handleTwinSelect(twin.id)}
-                                className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-50 transition-colors ${twin.id === activeTwinId ? 'bg-indigo-50' : ''
+                                className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-50 transition-colors ${twin.id === activeTwin?.id ? 'bg-indigo-50' : ''
                                     }`}
                             >
-                                <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm ${twin.id === activeTwinId
+                                <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm ${twin.id === activeTwin?.id
                                     ? 'bg-indigo-500 text-white'
                                     : 'bg-slate-100 text-slate-600'
                                     }`}>
                                     {SPEC_ICONS[twin.specialization || 'vanilla'] || '🧠'}
                                 </div>
                                 <div className="flex-1 min-w-0">
-                                    <p className={`font-medium truncate ${twin.id === activeTwinId ? 'text-indigo-900' : 'text-slate-900'
+                                    <p className={`font-medium truncate ${twin.id === activeTwin?.id ? 'text-indigo-900' : 'text-slate-900'
                                         }`}>
                                         {twin.name}
                                     </p>
@@ -140,7 +128,7 @@ export const TwinSelector: React.FC<TwinSelectorProps> = ({
                                         Digital Twin
                                     </p>
                                 </div>
-                                {twin.id === activeTwinId && (
+                                {twin.id === activeTwin?.id && (
                                     <svg className="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
                                     </svg>

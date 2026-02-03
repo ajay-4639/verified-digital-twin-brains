@@ -46,8 +46,9 @@ interface TwinContextType {
 
     // Actions
     setActiveTwin: (twinId: string) => void;
-    refreshTwins: () => Promise<void>;
+    refreshTwins: (optsOrToken?: { allowEmpty?: boolean } | string, providedToken?: string) => Promise<void>;
     syncUser: () => Promise<UserProfile | null>;
+    clearActiveTwin: () => void;
 }
 
 const TwinContext = createContext<TwinContextType | undefined>(undefined);
@@ -219,17 +220,20 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
     // ========================================================================
     // refreshTwins with Race Protection
     // ========================================================================
-    const refreshTwins = useCallback(async (providedToken?: string) => {
+    const refreshTwins = useCallback(async (optsOrToken?: { allowEmpty?: boolean } | string, providedToken?: string) => {
         // Race protection: increment request ID
         const thisRequestId = ++requestIdRef.current;
         console.log('[TwinContext] refreshTwins called, requestId:', thisRequestId);
         setError(null);
 
+        const options = (typeof optsOrToken === 'object' && optsOrToken !== null ? optsOrToken : {}) as { allowEmpty?: boolean };
+        const tokenArg = typeof optsOrToken === 'string' ? optsOrToken : providedToken;
+
         try {
-            const token = providedToken || await getToken();
+            const token = tokenArg || await getToken();
 
             // Sync token cache if we were provided one
-            if (providedToken) tokenRef.current = providedToken;
+            if (tokenArg) tokenRef.current = tokenArg;
 
             // Race check after async
             if (thisRequestId !== requestIdRef.current) {
@@ -277,7 +281,7 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
             // CRITICAL: Only wipe twins if we have NOT hydrated yet (first load)
             // OR if we genuinely get an empty list after a successful prior load.
             // This prevents transient failures from wiping existing state.
-            if (twinsList.length === 0 && isHydratedRef.current) {
+            if (twinsList.length === 0 && isHydratedRef.current && !options.allowEmpty) {
                 // We already have twins, got empty response - could be transient. 
                 // Keep existing state and log warning.
                 console.warn(`[TwinContext][${mountId}] refreshTwins: Empty response but already hydrated. Keeping existing twins.`);
@@ -297,6 +301,8 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
                 const selected = selectActiveTwin(twinsList, prevActiveTwin?.id || null);
                 if (selected) {
                     persistTwinId(selected.id);
+                } else if (options.allowEmpty || twinsList.length === 0) {
+                    try { localStorage.removeItem('activeTwinId'); } catch { }
                 }
                 console.log(`[TwinContext][${mountId}] refreshTwins complete. Active:`, selected?.id, 'Total:', twinsList.length);
                 return selected;
@@ -325,6 +331,11 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
             console.warn('[TwinContext] setActiveTwin: Twin not found in list:', twinId);
         }
     }, [twins, persistTwinId]);
+
+    const clearActiveTwin = useCallback(() => {
+        setActiveTwinState(null);
+        try { localStorage.removeItem('activeTwinId'); } catch { }
+    }, []);
 
     // ========================================================================
     // Initialization (StrictMode-safe)
@@ -416,7 +427,8 @@ export function TwinProvider({ children }: { children: React.ReactNode }) {
         activeTwin,
         setActiveTwin,
         refreshTwins,
-        syncUser
+        syncUser,
+        clearActiveTwin
     };
 
     return (

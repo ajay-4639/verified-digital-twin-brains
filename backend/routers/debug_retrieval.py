@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Body
 from pydantic import BaseModel
 from typing import List, Optional, Any, Dict
 from modules.retrieval import retrieve_context
-from modules.auth_guard import get_current_user
+from modules.auth_guard import get_current_user, verify_twin_ownership, ensure_twin_active
 from modules.observability import supabase
 import asyncio
 
@@ -20,11 +20,14 @@ class RetrievalDebugRequest(BaseModel):
 @router.post("/retrieval")
 async def debug_retrieval(
     request: RetrievalDebugRequest,
-    # current_user: dict = Depends(get_current_user) # Temporarily disabled for easier testing via curl/verify script
+    current_user: dict = Depends(get_current_user)
 ):
     print(f"[Debug Retrieval] Query: {request.query}, Twin: {request.twin_id}")
     
     try:
+        verify_twin_ownership(request.twin_id, current_user)
+        ensure_twin_active(request.twin_id)
+
         # Call the actual retrieval function
         contexts = await retrieve_context(request.query, request.twin_id, top_k=request.top_k)
         

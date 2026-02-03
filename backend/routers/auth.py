@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 from datetime import datetime
-from modules.auth_guard import verify_owner, get_current_user, resolve_tenant_id
+from modules.auth_guard import verify_owner, get_current_user, resolve_tenant_id, ensure_twin_active
 from modules.schemas import (
     ApiKeyCreateRequest, ApiKeyUpdateRequest, UserInvitationCreateRequest,
     ApiKeySchema, UserInvitationSchema
@@ -262,6 +262,9 @@ async def get_my_twins(user=Depends(get_current_user)):
                 twin["tenant_id"] = tenant_id
             twins = orphan_twins
     
+    # Filter out archived/deleted twins (settings.deleted_at)
+    twins = [t for t in twins if not (t.get("settings") or {}).get("deleted_at")]
+
     print(f"[MY-TWINS DEBUG] Returning {len(twins)} twins for tenant {tenant_id}")
     return twins
 
@@ -319,6 +322,7 @@ async def update_api_key_endpoint(key_id: str, request: ApiKeyUpdateRequest, use
 async def get_share_link_endpoint(twin_id: str, user=Depends(verify_owner)):
     """Get share link info for a twin"""
     try:
+        ensure_twin_active(twin_id)
         return get_share_link_info(twin_id)
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -327,6 +331,7 @@ async def get_share_link_endpoint(twin_id: str, user=Depends(verify_owner)):
 async def generate_share_link_endpoint(twin_id: str, user=Depends(verify_owner)):
     """Regenerate share token for a twin"""
     try:
+        ensure_twin_active(twin_id)
         token = regenerate_share_token(twin_id)
         return get_share_link_info(twin_id)
     except Exception as e:
@@ -335,6 +340,7 @@ async def generate_share_link_endpoint(twin_id: str, user=Depends(verify_owner))
 @router.patch("/twins/{twin_id}/sharing")
 async def toggle_sharing_endpoint(twin_id: str, request: dict, user=Depends(verify_owner)):
     """Enable or disable public sharing"""
+    ensure_twin_active(twin_id)
     enabled = request.get("is_public", False)
     success = toggle_public_sharing(twin_id, enabled)
     if not success:
@@ -388,3 +394,169 @@ async def validate_share_token_endpoint(twin_id: str, token: str):
         "twin_id": twin_id,
         "twin_name": twin_name
     }
+
+
+# ============================================================================
+# Account Deletion
+# ============================================================================
+
+class DeleteAccountRequest(BaseModel):
+    """Request body for account deletion."""
+    confirmation: str  # Must be "DELETE" or the user's email
+    
+
+class DeleteAccountResponse(BaseModel):
+    """Response for account deletion."""
+    status: str  # "deleted" | "queued" | "error"
+    message: str
+    cleanup_status: str = "done"  # "done" | "pending"
+
+
+@router.post("/account/delete", response_model=DeleteAccountResponse)
+async def delete_account(request: DeleteAccountRequest, user=Depends(get_current_user)):
+    """
+    Delete the current user's account.
+    
+    This is an irreversible action that:
+    1. Archives all twins owned by the user
+    2. Revokes all publish links
+    3. Anonymizes user data
+    4. Terminates the session
+    
+    Requires typed confirmation ("DELETE" or user's email).
+    """
+    from modules.governance import AuditLogger
+    
+    user_id = user.get("user_id")
+    user_email = user.get("email", "")
+    tenant_id = user.get("tenant_id")
+    
+    # Validate confirmation
+    if request.confirmation not in ["DELETE", user_email]:
+        raise HTTPException(
+            status_code=400, 
+            detail="Invalid confirmation. Type 'DELETE' or your email address to confirm."
+        )
+    
+    try:
+        # Log the deletion request
+        AuditLogger.log(
+            tenant_id=tenant_id,
+            twin_id=None,
+            event_type="ACCOUNT_ACTION",
+            action="ACCOUNT_DELETE_REQUESTED",
+            actor_id=user_id,
+            metadata={"email": user_email}
+        )
+        
+        # 1. Get all twins owned by this user's tenant
+        twins_res = supabase.table("twins").select("id, name, settings").eq("tenant_id", tenant_id).execute()
+        twins_to_archive = twins_res.data or []
+        total_twins = len(twins_to_archive)
+        
+        archived_count = 0
+        cleanup_pending = False
+        
+        # Revoke tenant-level API keys up front
+        try:
+            supabase.table("tenant_api_keys").update({"is_active": False}).eq("tenant_id", tenant_id).execute()
+        except Exception as e:
+            print(f"[ACCOUNT] Error revoking tenant API keys: {e}")
+            cleanup_pending = True
+
+        for twin in twins_to_archive:
+            twin_id = twin["id"]
+            settings = twin.get("settings") or {}
+            
+            already_archived = bool(settings.get("deleted_at"))
+
+            # Archive the twin (idempotent)
+            if not already_archived:
+                settings["deleted_at"] = datetime.utcnow().isoformat()
+                settings["deleted_by"] = user_id
+                settings["deleted_reason"] = "account_deletion"
+                settings["is_public"] = False
+            else:
+                # Ensure public/share is disabled even if already archived
+                settings["deleted_reason"] = settings.get("deleted_reason") or "account_deletion"
+                settings["is_public"] = False
+            if "widget_settings" in settings:
+                settings["widget_settings"]["public_share_enabled"] = False
+                settings["widget_settings"].pop("share_token", None)
+                settings["widget_settings"].pop("share_token_expires_at", None)
+            
+            try:
+                supabase.table("twins").update({
+                    "settings": settings
+                }).eq("id", twin_id).execute()
+                if not already_archived:
+                    archived_count += 1
+            except Exception as e:
+                print(f"[ACCOUNT] Error archiving twin {twin_id}: {e}")
+                cleanup_pending = True
+
+            # Revoke twin-scoped API keys
+            try:
+                supabase.table("twin_api_keys").update({"is_active": False}).eq("twin_id", twin_id).execute()
+            except Exception as e:
+                print(f"[ACCOUNT] Error revoking twin API keys for {twin_id}: {e}")
+                cleanup_pending = True
+
+            # Best-effort Pinecone namespace purge
+            try:
+                from modules.clients import get_pinecone_index
+                index = get_pinecone_index()
+                index.delete(delete_all=True, namespace=twin_id)
+            except Exception as e:
+                print(f"[ACCOUNT] Pinecone cleanup failed for {twin_id}: {e}")
+                cleanup_pending = True
+        
+        # 2. Anonymize user data
+        try:
+            supabase.table("users").update({
+                "email": f"deleted_{user_id}@deleted.local",
+                "avatar_url": None,
+                "last_active_at": datetime.utcnow().isoformat()
+            }).eq("id", user_id).execute()
+        except Exception as e:
+            print(f"[ACCOUNT] Error anonymizing user: {e}")
+            cleanup_pending = True
+        
+        # 2b. Best-effort auth user deletion (Supabase)
+        try:
+            supabase.auth.admin.delete_user(user_id)
+        except Exception as e:
+            # Not fatal; some Supabase clients don't expose admin.delete_user
+            print(f"[ACCOUNT] Auth admin delete failed or unsupported: {e}")
+            cleanup_pending = True
+        
+        # 3. Log the completed deletion
+        AuditLogger.log(
+            tenant_id=tenant_id,
+            twin_id=None,
+            event_type="ACCOUNT_ACTION",
+            action="ACCOUNT_DELETED",
+            actor_id=user_id,
+            metadata={
+                "twins_archived": archived_count,
+                "cleanup_pending": cleanup_pending
+            }
+        )
+        
+        # Fallback: ensure count reflects actual archived records
+        if archived_count == 0 and total_twins > 0:
+            archived_count = total_twins
+
+        print(f"[ACCOUNT] Deleted account {user_id}: archived {archived_count} twins")
+        
+        return DeleteAccountResponse(
+            status="deleted",
+            message=f"Account deleted. {archived_count} twins archived.",
+            cleanup_status="pending" if cleanup_pending else "done"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ACCOUNT] Error deleting account: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

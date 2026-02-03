@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { getSupabaseClient } from '@/lib/supabase/client';
 import { useTwin } from '@/lib/context/TwinContext';
 import DeleteTwinModal from '@/components/ui/DeleteTwinModal';
+import { useToast } from '@/components/ui';
 
 interface UserProfile {
   name: string;
@@ -25,14 +26,17 @@ interface TwinSettings {
 const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
 
 export default function SettingsPage() {
-  const { activeTwin, user, refreshTwins, isLoading: twinLoading } = useTwin();
+  const { activeTwin, user, refreshTwins, isLoading: twinLoading, clearActiveTwin } = useTwin();
   const supabase = getSupabaseClient();
+  const { showToast } = useToast();
 
   const [activeTab, setActiveTab] = useState<'profile' | 'twin' | 'billing' | 'danger'>('profile');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [twinActionLoading, setTwinActionLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const router = useRouter();
 
   // Empty defaults - will be populated from activeTwin
@@ -129,11 +133,15 @@ export default function SettingsPage() {
         await refreshTwins();
         setSaved(true);
         setTimeout(() => setSaved(false), 2000);
+        showToast('Settings saved', 'success');
       } else {
-        console.error('[Settings] Save failed:', await response.text());
+        const errText = await response.text();
+        console.error('[Settings] Save failed:', errText);
+        showToast('Failed to save settings', 'error');
       }
     } catch (error) {
       console.error('[Settings] Error saving:', error);
+      showToast('Failed to save settings', 'error');
     } finally {
       setSaving(false);
     }
@@ -142,36 +150,137 @@ export default function SettingsPage() {
   // Delete twin handler
   const handleDeleteTwin = async (permanent: boolean): Promise<void> => {
     if (!activeTwin) throw new Error('No active twin');
+    setTwinActionLoading(true);
 
-    const token = await getAuthToken();
-    if (!token) throw new Error('Not authenticated');
+    try {
+      const token = await getAuthToken();
+      if (!token) throw new Error('Not authenticated');
 
-    // Use archive endpoint for soft delete, DELETE with ?hard=true for permanent
-    const url = permanent
-      ? `${API_URL}/twins/${activeTwin.id}?hard=true`
-      : `${API_URL}/twins/${activeTwin.id}/archive`;
-    const method = permanent ? 'DELETE' : 'POST';
+      // Use archive endpoint for soft delete, DELETE with ?hard=true for permanent
+      const url = permanent
+        ? `${API_URL}/twins/${activeTwin.id}?hard=true`
+        : `${API_URL}/twins/${activeTwin.id}/archive`;
+      const method = permanent ? 'DELETE' : 'POST';
 
-    const response = await fetch(url, {
-      method,
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
+      const response = await fetch(url, {
+        method,
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+        showToast(errorData.detail || 'Failed to delete twin', 'error');
+        throw new Error(errorData.detail || 'Failed to delete twin');
       }
-    });
 
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
-      throw new Error(errorData.detail || 'Failed to delete twin');
+      console.log('[Settings] Twin deleted successfully, refreshing...');
+      await refreshTwins({ allowEmpty: true });
+      clearActiveTwin();
+      showToast(permanent ? 'Twin permanently deleted' : 'Twin archived', 'success');
+      router.push('/dashboard');
+    } finally {
+      setTwinActionLoading(false);
+    }
+  };
+
+  // Export twin handler
+  const handleExportTwin = async () => {
+    if (!activeTwin) {
+      showToast('No twin selected', 'warning');
+      return;
     }
 
-    console.log('[Settings] Twin deleted successfully, refreshing...');
+    try {
+      setExporting(true);
+      const token = await getAuthToken();
+      if (!token) {
+        showToast('Not authenticated', 'error');
+        return;
+      }
 
-    // Refresh the twins list - this will clear the deleted twin
-    await refreshTwins();
+      const response = await fetch(`${API_URL}/twins/${activeTwin.id}/export`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        }
+      });
 
-    // Navigate away since this twin no longer exists
-    router.push('/dashboard');
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+        showToast(`Export failed: ${errorData.detail}`, 'error');
+        return;
+      }
+
+      // Trigger download
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `twin_${activeTwin.id}_export.json`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+
+      console.log('[Settings] Twin exported successfully');
+      showToast('Twin export downloaded', 'success');
+    } catch (error) {
+      console.error('[Settings] Export error:', error);
+      showToast('Failed to export twin', 'error');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  // Delete account handler
+  const [showDeleteAccountModal, setShowDeleteAccountModal] = useState(false);
+  const [deleteConfirmation, setDeleteConfirmation] = useState('');
+  const [deletingAccount, setDeletingAccount] = useState(false);
+
+  const handleDeleteAccount = async () => {
+    if (deleteConfirmation !== 'DELETE' && deleteConfirmation !== user?.email) {
+      showToast('Please type DELETE or your email to confirm', 'warning');
+      return;
+    }
+
+    setDeletingAccount(true);
+    try {
+      const token = await getAuthToken();
+      if (!token) {
+        showToast('Not authenticated', 'error');
+        return;
+      }
+
+      const response = await fetch(`${API_URL}/account/delete`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ confirmation: deleteConfirmation })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+        showToast(`Account deletion failed: ${errorData.detail}`, 'error');
+        return;
+      }
+
+      // Show success before signing out + redirecting
+      showToast('Account deleted', 'success');
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      await supabase.auth.signOut();
+      clearActiveTwin();
+      router.push('/');
+    } catch (error) {
+      console.error('[Settings] Delete account error:', error);
+      showToast('Failed to delete account', 'error');
+    } finally {
+      setDeletingAccount(false);
+    }
   };
 
   const tabs = [
@@ -180,6 +289,7 @@ export default function SettingsPage() {
     { id: 'billing', label: 'Billing', icon: '💳' },
     { id: 'danger', label: 'Danger Zone', icon: '⚠️' },
   ];
+
 
   // Loading state
   if (twinLoading || (activeTab === 'twin' && !settingsLoaded && activeTwin)) {
@@ -447,10 +557,14 @@ export default function SettingsPage() {
             <div className="p-4 border border-red-200 rounded-xl flex items-center justify-between">
               <div>
                 <p className="font-medium text-slate-900">Export Data</p>
-                <p className="text-sm text-slate-500">Download all your twin's data</p>
+                <p className="text-sm text-slate-500">Download all your twin&apos;s data</p>
               </div>
-              <button className="px-4 py-2 border border-slate-200 text-slate-700 font-medium text-sm rounded-xl hover:bg-slate-50 transition-colors">
-                Export
+              <button
+                onClick={handleExportTwin}
+                disabled={!activeTwin || exporting}
+                className="px-4 py-2 border border-slate-200 text-slate-700 font-medium text-sm rounded-xl hover:bg-slate-50 transition-colors disabled:opacity-50"
+              >
+                {exporting ? 'Exporting...' : 'Export'}
               </button>
             </div>
             <div className="p-4 border border-red-200 rounded-xl flex items-center justify-between">
@@ -460,9 +574,10 @@ export default function SettingsPage() {
               </div>
               <button
                 onClick={() => setShowDeleteModal(true)}
-                className="px-4 py-2 bg-red-500 text-white font-medium text-sm rounded-xl hover:bg-red-600 transition-colors"
+                disabled={!activeTwin || twinActionLoading}
+                className="px-4 py-2 bg-red-500 text-white font-medium text-sm rounded-xl hover:bg-red-600 transition-colors disabled:opacity-50"
               >
-                Delete
+                {twinActionLoading ? 'Working...' : 'Delete'}
               </button>
             </div>
             <div className="p-4 border border-red-200 rounded-xl flex items-center justify-between">
@@ -470,7 +585,10 @@ export default function SettingsPage() {
                 <p className="font-medium text-slate-900">Delete Account</p>
                 <p className="text-sm text-slate-500">Permanently delete your account and all data</p>
               </div>
-              <button className="px-4 py-2 bg-red-600 text-white font-medium text-sm rounded-xl hover:bg-red-700 transition-colors">
+              <button
+                onClick={() => setShowDeleteAccountModal(true)}
+                className="px-4 py-2 bg-red-600 text-white font-medium text-sm rounded-xl hover:bg-red-700 transition-colors"
+              >
                 Delete Account
               </button>
             </div>
@@ -500,8 +618,57 @@ export default function SettingsPage() {
         onClose={() => setShowDeleteModal(false)}
         onDelete={handleDeleteTwin}
         twinName={activeTwin?.name || ''}
+        twinHandle={(activeTwin?.settings as any)?.handle || ''}
         twinId={activeTwin?.id || ''}
       />
+
+      {/* Delete Account Modal */}
+      {showDeleteAccountModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full mx-4 shadow-xl">
+            <h2 className="text-xl font-bold text-red-600 mb-2">Delete Account</h2>
+            <p className="text-slate-600 mb-4">
+              This will permanently delete your account and archive all your twins. This action cannot be undone.
+            </p>
+            <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-4">
+              <p className="text-sm text-red-700">
+                <strong>Warning:</strong> All your twins, data, and settings will be lost.
+              </p>
+            </div>
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-slate-700 mb-2">
+                Type <strong>DELETE</strong> or your email to confirm:
+              </label>
+              <input
+                type="text"
+                value={deleteConfirmation}
+                onChange={(e) => setDeleteConfirmation(e.target.value)}
+                placeholder="DELETE"
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
+              />
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  setShowDeleteAccountModal(false);
+                  setDeleteConfirmation('');
+                }}
+                className="flex-1 px-4 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteAccount}
+                disabled={deletingAccount || (deleteConfirmation !== 'DELETE' && deleteConfirmation !== user?.email)}
+                className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+              >
+                {deletingAccount ? 'Deleting...' : 'Delete Account'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+

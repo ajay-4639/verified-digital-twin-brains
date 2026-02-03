@@ -5,7 +5,7 @@ from modules.schemas import (
     ChatRequest, ChatMetadata, ChatWidgetRequest, PublicChatRequest, 
     MessageSchema, ConversationSchema
 )
-from modules.auth_guard import get_current_user, verify_twin_ownership, verify_conversation_ownership
+from modules.auth_guard import get_current_user, verify_twin_ownership, verify_conversation_ownership, ensure_twin_active
 from modules.access_groups import get_user_group, get_default_group
 from modules.observability import (
     supabase, get_conversations, get_messages, 
@@ -40,6 +40,7 @@ router = APIRouter(tags=["chat"])
 async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user)):
     # P0: Verify user has access to this twin
     verify_twin_ownership(twin_id, user)
+    ensure_twin_active(twin_id)
     
     query = request.query
     conversation_id = request.conversation_id
@@ -244,6 +245,7 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
 @router.get("/conversations/{twin_id}")
 async def list_conversations_endpoint(twin_id: str, user=Depends(get_current_user)):
     verify_twin_ownership(twin_id, user)
+    ensure_twin_active(twin_id)
     return get_conversations(twin_id)
 
 @router.get("/conversations/{conversation_id}/messages")
@@ -276,6 +278,7 @@ async def chat_widget(twin_id: str, request: ChatWidgetRequest, req_raw: Request
         raise HTTPException(status_code=403, detail="Domain not allowed")
     
     # 3. Handle Session
+    ensure_twin_active(twin_id)
     session_id = request.session_id
     if session_id:
         session = get_session(session_id)
@@ -377,6 +380,8 @@ async def public_chat_endpoint(twin_id: str, token: str, request: PublicChatRequ
     # Validate share token
     if not validate_share_token(token, twin_id):
         raise HTTPException(status_code=403, detail="Invalid or expired share link")
+    
+    ensure_twin_active(twin_id)
     
     # Rate limit by IP address for public endpoints
     client_ip = req_raw.client.host if req_raw and req_raw.client else "unknown"

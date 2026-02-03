@@ -26,6 +26,27 @@ from datetime import datetime
 router = APIRouter(tags=["twins"])
 
 
+def ensure_twin_owner_or_403(twin_id: str, user: dict) -> Dict[str, Any]:
+    """
+    Strict ownership check:
+    - 404 if twin does not exist
+    - 403 if twin exists but belongs to different tenant
+    Returns the twin record.
+    """
+    tenant_id = user.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="User has no tenant association")
+    
+    twin_res = supabase.table("twins").select("*").eq("id", twin_id).single().execute()
+    if not twin_res.data:
+        raise HTTPException(status_code=404, detail="Twin not found")
+    
+    if twin_res.data.get("tenant_id") != tenant_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    return twin_res.data
+
+
 # ============================================================================
 # Twin Create Schema
 # ============================================================================
@@ -119,13 +140,12 @@ async def list_twins(user=Depends(get_current_user)):
             # User has no tenant - return empty list (not an error)
             return []
         
-        # Get twins where tenant_id matches user's tenant AND not archived
-        # is_active=false indicates archived twin
-        response = supabase.table("twins").select("*").eq("tenant_id", tenant_id).neq("is_active", False).order("created_at", desc=True).execute()
+        # Get twins where tenant_id matches user's tenant
+        response = supabase.table("twins").select("*").eq("tenant_id", tenant_id).order("created_at", desc=True).execute()
         
         twins_list = response.data if response.data else []
         
-        # Additional filter: exclude any with deleted_at in settings (belt and suspenders)
+        # Filter out archived twins (those with deleted_at in settings)
         twins_list = [t for t in twins_list if not (t.get("settings") or {}).get("deleted_at")]
         
         print(f"[TWINS] Listing twins for tenant {tenant_id}: found {len(twins_list)}")
@@ -134,6 +154,7 @@ async def list_twins(user=Depends(get_current_user)):
     except Exception as e:
         print(f"[TWINS] ERROR listing twins: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/twins/{twin_id}")
 async def get_twin(twin_id: str, user=Depends(get_current_user)):
@@ -598,24 +619,11 @@ async def archive_twin(twin_id: str, user=Depends(verify_owner)):
     - Twin will no longer appear in lists
     - Idempotent: returns success if already archived
     """
-    # Verify ownership
-    verify_twin_ownership(twin_id, user)
-    
     tenant_id = user.get("tenant_id")
     user_id = user.get("user_id")
     
     try:
-        # Check if twin exists
-        twin_res = supabase.table("twins").select("id, name, settings").eq("id", twin_id).single().execute()
-        
-        if not twin_res.data:
-            return DeleteTwinResponse(
-                status="not_found",
-                twin_id=twin_id,
-                message="Twin not found"
-            )
-        
-        twin_data = twin_res.data
+        twin_data = ensure_twin_owner_or_403(twin_id, user)
         current_settings = twin_data.get("settings") or {}
         
         # Check if already archived
@@ -636,11 +644,13 @@ async def archive_twin(twin_id: str, user=Depends(verify_owner)):
         current_settings["is_public"] = False
         if "widget_settings" in current_settings:
             current_settings["widget_settings"]["public_share_enabled"] = False
+            current_settings["widget_settings"].pop("share_token", None)
+            current_settings["widget_settings"].pop("share_token_expires_at", None)
         
         supabase.table("twins").update({
-            "settings": current_settings,
-            "is_active": False  # Disable twin
+            "settings": current_settings
         }).eq("id", twin_id).execute()
+
         
         # Log the archive action
         AuditLogger.log(
@@ -689,9 +699,6 @@ async def delete_twin(
     
     Idempotent: repeated calls are safe
     """
-    # Verify ownership
-    verify_twin_ownership(twin_id, user)
-    
     tenant_id = user.get("tenant_id")
     user_id = user.get("user_id")
     
@@ -700,23 +707,21 @@ async def delete_twin(
         return await archive_twin(twin_id, user)
     
     try:
-        # Check if twin exists
-        twin_res = supabase.table("twins").select("id, name, settings, tenant_id").eq("id", twin_id).single().execute()
-        
-        if not twin_res.data:
-            # Already deleted or never existed - idempotent success
+        # Fetch twin for hard delete; allow idempotent success if missing
+        twin_res = supabase.table("twins").select("id, name, settings, tenant_id").eq("id", twin_id).execute()
+        twin_data = twin_res.data[0] if twin_res.data else None
+        if not twin_data:
             return DeleteTwinResponse(
                 status="deleted",
                 twin_id=twin_id,
                 message="Twin not found (already deleted or never existed)"
             )
-        
-        twin_data = twin_res.data
-        twin_name = twin_data.get("name", "Unknown")
-        
-        # Extra security check: verify tenant match
+
+        # Strict ownership check (403 on cross-tenant)
         if twin_data.get("tenant_id") != tenant_id:
             raise HTTPException(status_code=403, detail="Access denied")
+        
+        twin_name = twin_data.get("name", "Unknown")
         
         cleanup_status = "done"
         
@@ -732,13 +737,15 @@ async def delete_twin(
             cleanup_status = "pending"
         
         # 2. Log BEFORE deleting (since audit log references twin_id)
+        # NOTE: audit_logs.twin_id FK can cascade on delete; persist deletion logs with twin_id in metadata
         AuditLogger.log(
             tenant_id=tenant_id,
-            twin_id=twin_id,
+            twin_id=None,
             event_type="CONFIGURATION_CHANGE",
             action="TWIN_DELETED",
             actor_id=user_id,
             metadata={
+                "twin_id": twin_id,
                 "twin_name": twin_name,
                 "hard_delete": True,
                 "cleanup_status": cleanup_status
@@ -765,6 +772,184 @@ async def delete_twin(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================================
+# Twin Export Endpoint
+# ============================================================================
+
+class ExportTwinResponse(BaseModel):
+    """Response containing twin export data."""
+    twin: Dict[str, Any]
+    sources: list
+    chunks: list
+    nodes: list
+    edges: list
+    memory_events: list
+    access_groups: list
+    group_memberships: list
+    content_permissions: list
+    verification_logs: list
+    exported_at: str
+    export_version: str = "1.0"
+
+
+@router.get("/twins/{twin_id}/export")
+async def export_twin(twin_id: str, user=Depends(verify_owner)):
+    """
+    Export all twin data as a downloadable JSON bundle.
+    
+    Includes: twin profile, sources, chunks, nodes, memory events, verification logs.
+    Excludes: API key secrets, raw embeddings.
+    
+    Returns a JSON response that can be saved as a file.
+    """
+    from fastapi.responses import JSONResponse
+    
+    # Strict ownership check (403 on cross-tenant)
+    twin_data = ensure_twin_owner_or_403(twin_id, user)
+
+    tenant_id = user.get("tenant_id")
+    user_id = user.get("user_id")
+    
+    try:
+        # 1. Get twin profile (already fetched)
+        
+        # Remove sensitive fields from twin settings if present
+        if twin_data.get("settings"):
+            settings = twin_data["settings"].copy()
+            # Remove any API key references or share tokens
+            settings.pop("api_keys", None)
+            settings.pop("secrets", None)
+            if settings.get("widget_settings"):
+                settings["widget_settings"].pop("share_token", None)
+            twin_data["settings"] = settings
+        
+        # 2. Get sources (without internal processing fields)
+        sources = []
+        try:
+            sources_res = supabase.table("sources").select(
+                "id, filename, file_url, content_text, status, created_at, file_size, staging_status, health_status, chunk_count, extracted_text_length, author, citation_url, publish_date, keep_synced, sync_config"
+            ).eq("twin_id", twin_id).execute()
+            sources = sources_res.data or []
+        except Exception as e:
+            print(f"[TWINS] Warning: Failed to fetch sources: {e}")
+        
+        # 3. Get chunks (text content only, no embeddings)
+        chunks = []
+        source_ids = [s.get("id") for s in sources if s.get("id")]
+        try:
+            if source_ids:
+                chunks_res = supabase.table("chunks").select(
+                    "id, content, source_id, vector_id, metadata, created_at"
+                ).in_("source_id", source_ids).execute()
+                chunks = chunks_res.data or []
+        except Exception as e:
+            print(f"[TWINS] Warning: Failed to fetch chunks: {e}")
+        
+        # 4. Get graph nodes
+        nodes = []
+        try:
+            nodes_res = supabase.table("nodes").select(
+                "id, twin_id, name, type, description, properties, created_at, updated_at"
+            ).eq("twin_id", twin_id).execute()
+            nodes = nodes_res.data or []
+        except Exception as e:
+            print(f"[TWINS] Warning: Failed to fetch nodes: {e}")
+        
+        # 4b. Get graph edges
+        edges = []
+        try:
+            edges_res = supabase.table("edges").select(
+                "id, from_node_id, to_node_id, type, description, weight, properties, created_at"
+            ).eq("twin_id", twin_id).execute()
+            edges = edges_res.data or []
+        except Exception as e:
+            print(f"[TWINS] Warning: Failed to fetch edges: {e}")
+        
+        # 5. Get memory events
+        memory_events = []
+        try:
+            events_res = supabase.table("memory_events").select(
+                "id, event_type, payload, status, created_at"
+            ).eq("twin_id", twin_id).order("created_at", desc=True).limit(1000).execute()
+            memory_events = events_res.data or []
+        except Exception as e:
+            print(f"[TWINS] Warning: Failed to fetch memory events: {e}")
+        
+        # 6. Get verification logs (if table exists)
+        verification_logs = []
+        try:
+            logs_res = supabase.table("verification_logs").select(
+                "id, verification_type, result, created_at, metadata"
+            ).eq("twin_id", twin_id).order("created_at", desc=True).limit(100).execute()
+            verification_logs = logs_res.data or []
+        except Exception:
+            pass  # Table might not exist
+        
+        # 7. Access groups and permissions
+        access_groups = []
+        group_memberships = []
+        content_permissions = []
+        try:
+            ag_res = supabase.table("access_groups").select("*").eq("twin_id", twin_id).execute()
+            access_groups = ag_res.data or []
+            
+            gm_res = supabase.table("group_memberships").select("*").eq("twin_id", twin_id).execute()
+            group_memberships = gm_res.data or []
+            
+            cp_res = supabase.table("content_permissions").select("*").eq("twin_id", twin_id).execute()
+            content_permissions = cp_res.data or []
+        except Exception as e:
+            print(f"[TWINS] Warning: Failed to fetch access group data: {e}")
+        
+        # Build export bundle
+        export_data = {
+            "twin": twin_data,
+            "sources": sources,
+            "chunks": chunks,
+            "nodes": nodes,
+            "edges": edges,
+            "memory_events": memory_events,
+            "access_groups": access_groups,
+            "group_memberships": group_memberships,
+            "content_permissions": content_permissions,
+            "verification_logs": verification_logs,
+            "exported_at": datetime.utcnow().isoformat(),
+            "export_version": "1.0"
+        }
+        
+        # Log the export
+        AuditLogger.log(
+            tenant_id=tenant_id,
+            twin_id=twin_id,
+            event_type="DATA_EXPORT",
+            action="TWIN_EXPORT",
+            actor_id=user_id,
+            metadata={
+                "twin_name": twin_data.get("name"),
+                "sources_count": len(sources),
+                "chunks_count": len(chunks),
+                "nodes_count": len(nodes)
+            }
+        )
+        
+        print(f"[TWINS] Exported twin {twin_id}: {len(sources)} sources, {len(chunks)} chunks, {len(nodes)} nodes")
+        
+        # Return as downloadable JSON
+        return JSONResponse(
+            content=export_data,
+            headers={
+                "Content-Disposition": f'attachment; filename=\"twin_{twin_id}_export.json\"',
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[TWINS] Error exporting twin: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 def is_twin_deleted(twin_id: str) -> bool:
     """
     Check if a twin is archived/deleted.
@@ -773,23 +958,19 @@ def is_twin_deleted(twin_id: str) -> bool:
     Returns True if twin is deleted, False if active.
     """
     try:
-        twin_res = supabase.table("twins").select("settings, is_active").eq("id", twin_id).single().execute()
+        twin_res = supabase.table("twins").select("settings").eq("id", twin_id).single().execute()
         
         if not twin_res.data:
             return True  # Not found = treat as deleted
         
         settings = twin_res.data.get("settings") or {}
-        is_active = twin_res.data.get("is_active", True)
         
         # Check for soft delete marker
         if settings.get("deleted_at"):
             return True
         
-        # Check is_active flag
-        if not is_active:
-            return True
-        
         return False
     except Exception:
         return False  # On error, don't block (fail open for availability)
+
 

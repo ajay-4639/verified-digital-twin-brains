@@ -7,6 +7,7 @@ interface DeleteTwinModalProps {
     onClose: () => void;
     onDelete: (permanent: boolean) => Promise<void>;
     twinName: string;
+    twinHandle?: string;
     twinId: string;
 }
 
@@ -15,6 +16,7 @@ export default function DeleteTwinModal({
     onClose,
     onDelete,
     twinName,
+    twinHandle,
     twinId
 }: DeleteTwinModalProps) {
     const [step, setStep] = useState<'choose' | 'confirm'>('choose');
@@ -47,8 +49,11 @@ export default function DeleteTwinModal({
     };
 
     const handleDelete = async () => {
-        if (confirmText !== twinName) {
-            setError('Twin name does not match');
+        const normalized = confirmText.trim();
+        const nameMatch = normalized === twinName;
+        const handleMatch = twinHandle ? normalized === twinHandle : false;
+        if (!nameMatch && !handleMatch) {
+            setError('Confirmation does not match twin name or handle');
             return;
         }
 
@@ -65,7 +70,7 @@ export default function DeleteTwinModal({
         }
     };
 
-    const isConfirmValid = confirmText === twinName;
+    const isConfirmValid = confirmText.trim() === twinName || (twinHandle ? confirmText.trim() === twinHandle : false);
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -207,13 +212,15 @@ export default function DeleteTwinModal({
                             {/* Confirmation input */}
                             <div>
                                 <label className="block text-sm font-medium text-slate-700 mb-2">
-                                    Type <span className="font-bold text-slate-900">"{twinName}"</span> to confirm:
+                                    Type <span className="font-bold text-slate-900">"{twinName}"</span>
+                                    {twinHandle ? <span> or <span className="font-bold text-slate-900">"{twinHandle}"</span></span> : null}
+                                    {" "}to confirm:
                                 </label>
                                 <input
                                     type="text"
                                     value={confirmText}
                                     onChange={(e) => setConfirmText(e.target.value)}
-                                    placeholder={twinName}
+                                    placeholder={twinHandle ? `${twinName} or ${twinHandle}` : twinName}
                                     className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent"
                                     autoFocus
                                 />

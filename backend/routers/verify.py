@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Optional
 import random
 import asyncio
 
-from modules.auth_guard import get_current_user, verify_twin_ownership
+from modules.auth_guard import get_current_user, verify_twin_ownership, ensure_twin_active
 from modules.observability import supabase
 from modules.retrieval import retrieve_context
 
@@ -34,6 +34,7 @@ async def run_verification(twin_id: str, user=Depends(get_current_user)):
     # 1. Verify Ownership
     try:
         verify_twin_ownership(twin_id, user)
+        ensure_twin_active(twin_id)
     except HTTPException as e:
         raise e
     except Exception as e:

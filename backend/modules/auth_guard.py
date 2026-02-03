@@ -209,6 +209,19 @@ def get_current_user(
             if user_lookup.data and len(user_lookup.data) > 0:
                 tenant_id = user_lookup.data[0].get("tenant_id")
                 print(f"[AUTH DEBUG] tenant_id from direct lookup: {tenant_id}")
+
+            # Check if user is deleted/anonymized (block all access)
+            try:
+                user_record = supabase_client.table("users").select("email").eq("id", user_id).single().execute()
+                if user_record.data:
+                    email_in_db = (user_record.data.get("email") or "").lower()
+                    if email_in_db.startswith("deleted_") or email_in_db.endswith("@deleted.local"):
+                        raise HTTPException(status_code=401, detail="Account has been deleted")
+            except HTTPException:
+                raise
+            except Exception as e:
+                # If the user lookup fails, do not hard fail (preserve availability)
+                print(f"[AUTH WARNING] User deletion check failed: {e}")
             
             # Fallback: try join through tenants table
             if not tenant_id:
@@ -222,6 +235,9 @@ def get_current_user(
             # CRITICAL: Log if tenant_id is still null for debugging
             if not tenant_id:
                 print(f"[AUTH WARNING] User {user_id} has NO tenant_id - twins will return empty")
+        except HTTPException:
+            # Preserve explicit auth failures (e.g., deleted account)
+            raise
         except Exception as e:
             # User might not exist yet (first login) - sync-user will create them
             print(f"[AUTH ERROR] Tenant lookup failed for user {user_id}: {e}")
@@ -469,4 +485,32 @@ def verify_conversation_ownership(conversation_id: str, user: dict) -> str:
     verify_twin_ownership(conv_twin_id, user)
     
     return conv_twin_id
+
+
+# ============================================================================
+# Twin Lifecycle Guards
+# ============================================================================
+
+def ensure_twin_active(twin_id: str) -> None:
+    """
+    Raise 410 Gone if the twin is archived/deleted.
+    
+    NOTE: Allowlist callers (export/delete endpoints) should skip this guard.
+    """
+    from modules.observability import supabase as supabase_client
+    
+    try:
+        twin_res = supabase_client.table("twins").select("settings").eq("id", twin_id).single().execute()
+        if not twin_res.data:
+            raise HTTPException(status_code=404, detail="Twin not found")
+        
+        settings = twin_res.data.get("settings") or {}
+        if settings.get("deleted_at"):
+            raise HTTPException(status_code=410, detail="Twin is archived or deleted")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ensure_twin_active] Failed to check twin state: {e}")
+        # Fail closed: avoid serving deleted twins if we cannot verify state
+        raise HTTPException(status_code=410, detail="Twin is unavailable")
 

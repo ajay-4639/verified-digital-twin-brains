@@ -12,12 +12,14 @@ export default function ChatInterface({
   twinId,
   conversationId,
   onConversationStarted,
-  resetKey
+  resetKey,
+  tenantId
 }: {
   twinId: string;
   conversationId?: string | null;
   onConversationStarted?: (id: string) => void;
   resetKey?: number;
+  tenantId?: string | null;
 }) {
   const { user } = useTwin();
   const [messages, setMessages] = useState<Message[]>([
@@ -37,9 +39,9 @@ export default function ChatInterface({
 
   const supabase = getSupabaseClient();
   const storageKey = useMemo(() => {
-    const tenantId = user?.tenant_id || 'unknown';
-    return `simulator_chat_${tenantId}_${twinId}`;
-  }, [user?.tenant_id, twinId]);
+    const resolvedTenantId = tenantId || user?.tenant_id || 'unknown';
+    return `simulator_chat_${resolvedTenantId}_${twinId}`;
+  }, [tenantId, user?.tenant_id, twinId]);
 
   const getAuthToken = useCallback(async (): Promise<string | null> => {
     const { data: { session } } = await supabase.auth.getSession();

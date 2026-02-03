@@ -62,6 +62,7 @@ export default function SimulatorPage() {
             <div className="flex-1 shadow-2xl rounded-2xl overflow-hidden bg-white border border-slate-200">
                 <ChatInterface
                     twinId={contextTwin.id}
+                    tenantId={contextTwin.tenant_id}
                     conversationId={currentConversationId}
                     onConversationStarted={setCurrentConversationId}
                     resetKey={resetCounter}

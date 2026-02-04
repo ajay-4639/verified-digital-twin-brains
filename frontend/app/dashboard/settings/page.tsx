@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { getSupabaseClient } from '@/lib/supabase/client';
 import { useTwin } from '@/lib/context/TwinContext';
@@ -46,6 +46,15 @@ export default function SettingsPage() {
     avatarUrl: ''
   });
 
+  // Password change state
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [changingPassword, setChangingPassword] = useState(false);
+
+  // Photo upload
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+
   // Empty defaults - will be populated from activeTwin.settings
   const [twinSettings, setTwinSettings] = useState<TwinSettings>({
     name: '',
@@ -62,6 +71,97 @@ export default function SettingsPage() {
     const { data: { session } } = await supabase.auth.getSession();
     return session?.access_token;
   }, [supabase]);
+
+  // Handle photo upload
+  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Validate file
+    if (!file.type.startsWith('image/')) {
+      showToast('Please select an image file', 'error');
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      showToast('Image must be under 5MB', 'error');
+      return;
+    }
+
+    setUploadingPhoto(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.user) {
+        showToast('Not authenticated', 'error');
+        return;
+      }
+
+      const userId = session.user.id;
+      const fileExt = file.name.split('.').pop();
+      const filePath = `avatars/${userId}.${fileExt}`;
+
+      // Upload to Supabase Storage
+      const { error: uploadError } = await supabase.storage
+        .from('avatars')
+        .upload(filePath, file, { upsert: true });
+
+      if (uploadError) {
+        console.error('[Settings] Upload error:', uploadError);
+        showToast('Upload failed. Storage may not be configured.', 'error');
+        return;
+      }
+
+      // Get public URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('avatars')
+        .getPublicUrl(filePath);
+
+      // Update profile state
+      setProfile(prev => ({ ...prev, avatarUrl: publicUrl }));
+      showToast('Photo uploaded', 'success');
+    } catch (err) {
+      console.error('[Settings] Photo upload error:', err);
+      showToast('Failed to upload photo', 'error');
+    } finally {
+      setUploadingPhoto(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
+  // Handle password change
+  const handlePasswordChange = async () => {
+    if (!newPassword.trim()) {
+      showToast('Please enter a new password', 'error');
+      return;
+    }
+    if (newPassword.length < 6) {
+      showToast('Password must be at least 6 characters', 'error');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      showToast('Passwords do not match', 'error');
+      return;
+    }
+
+    setChangingPassword(true);
+    try {
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) {
+        console.error('[Settings] Password change error:', error);
+        showToast(error.message || 'Failed to change password', 'error');
+        return;
+      }
+      showToast('Password changed successfully', 'success');
+      setNewPassword('');
+      setConfirmPassword('');
+    } catch (err) {
+      console.error('[Settings] Password error:', err);
+      showToast('Failed to change password', 'error');
+    } finally {
+      setChangingPassword(false);
+    }
+  };
 
   // Initialize from activeTwin when it changes
   useEffect(() => {
@@ -335,12 +435,29 @@ export default function SettingsPage() {
 
           {/* Avatar */}
           <div className="flex items-center gap-6">
-            <div className="w-20 h-20 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-full flex items-center justify-center text-2xl font-bold text-white">
-              {profile.name.split(' ').map(n => n[0]).join('')}
+            <div className="w-20 h-20 rounded-full flex items-center justify-center text-2xl font-bold text-white overflow-hidden">
+              {profile.avatarUrl ? (
+                <img src={profile.avatarUrl} alt="Avatar" className="w-full h-full object-cover" />
+              ) : (
+                <div className="w-full h-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
+                  {profile.name.split(' ').map(n => n[0]).join('')}
+                </div>
+              )}
             </div>
             <div>
-              <button className="px-4 py-2 bg-slate-100 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-200 transition-colors">
-                Upload Photo
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handlePhotoUpload}
+                className="hidden"
+              />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploadingPhoto}
+                className="px-4 py-2 bg-slate-100 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-200 transition-colors disabled:opacity-50"
+              >
+                {uploadingPhoto ? 'Uploading...' : 'Upload Photo'}
               </button>
               <p className="text-xs text-slate-400 mt-2">JPG, PNG up to 5MB</p>
             </div>
@@ -376,6 +493,8 @@ export default function SettingsPage() {
                 <label className="block text-sm font-medium text-slate-700 mb-2">New Password</label>
                 <input
                   type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
                   placeholder="••••••••"
                   className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                 />
@@ -384,11 +503,20 @@ export default function SettingsPage() {
                 <label className="block text-sm font-medium text-slate-700 mb-2">Confirm Password</label>
                 <input
                   type="password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
                   placeholder="••••••••"
                   className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                 />
               </div>
             </div>
+            <button
+              onClick={handlePasswordChange}
+              disabled={changingPassword || !newPassword.trim()}
+              className="mt-4 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50"
+            >
+              {changingPassword ? 'Updating...' : 'Update Password'}
+            </button>
           </div>
         </div>
       )}

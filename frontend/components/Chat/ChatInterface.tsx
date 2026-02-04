@@ -30,6 +30,7 @@ export default function ChatInterface({
     {
       role: 'assistant',
       content: "Hello! I am your Verified Digital Twin. Ask me anything about your uploaded documents.",
+      timestamp: Date.now(),
     }
   ]);
   const [input, setInput] = useState('');
@@ -111,6 +112,7 @@ export default function ChatInterface({
           setMessages([{
             role: 'assistant',
             content: "Hello! I am your Verified Digital Twin. Ask me anything about your uploaded documents.",
+            timestamp: Date.now(),
           }]);
         }
         return;
@@ -134,6 +136,7 @@ export default function ChatInterface({
           setMessages(history.length > 0 ? history : [{
             role: 'assistant',
             content: "Hello! I am your Verified Digital Twin. Ask me anything about your uploaded documents.",
+            timestamp: Date.now(),
           }]);
         }
       } catch (error) {
@@ -157,6 +160,7 @@ export default function ChatInterface({
     setMessages([{
       role: 'assistant',
       content: "Hello! I am your Verified Digital Twin. Ask me anything about your uploaded documents.",
+      timestamp: Date.now(),
     }]);
     setLastError(null);
     setLastUserMessage(null);
@@ -167,7 +171,7 @@ export default function ChatInterface({
     if (!text || loading) return;
 
     if (!options?.retry) {
-      const userMsg: Message = { role: 'user', content: text };
+      const userMsg: Message = { role: 'user', content: text, timestamp: Date.now() };
       setMessages((prev) => [...prev, userMsg]);
       setInput('');
     }
@@ -182,6 +186,7 @@ export default function ChatInterface({
     const assistantMsg: Message = {
       role: 'assistant',
       content: '',
+      timestamp: Date.now(),
     };
     setMessages((prev) => [...prev, assistantMsg]);
 
@@ -339,6 +344,7 @@ export default function ChatInterface({
     setMessages([{
       role: 'assistant',
       content: "Hello! I am your Verified Digital Twin. Ask me anything about your uploaded documents.",
+      timestamp: Date.now(),
     }]);
     setLastError(null);
     setLastUserMessage(null);
@@ -431,10 +437,10 @@ export default function ChatInterface({
                   setClarifyAnswer('');
                   setClarifyOption(null);
                   onMemoryUpdated?.();
-                  setMessages((prev) => [...prev, { role: 'assistant', content: 'Saved. Ask again and I will answer using your memory.' }]);
+                  setMessages((prev) => [...prev, { role: 'assistant', content: 'Saved. Ask again and I will answer using your memory.', timestamp: Date.now() }]);
                 } catch (err) {
                   console.error(err);
-                  setMessages((prev) => [...prev, { role: 'assistant', content: 'Failed to save clarification. Please retry.' }]);
+                  setMessages((prev) => [...prev, { role: 'assistant', content: 'Failed to save clarification. Please retry.', timestamp: Date.now() }]);
                 }
               }}
               className="px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-white bg-indigo-600 rounded-xl"

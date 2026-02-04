@@ -1,0 +1,64 @@
+# CODEOWNERS
+# This file tells GitHub who should review PRs that change certain files
+# GitHub will request reviews from appropriate owners automatically
+
+# Backend API Routers
+backend/routers/*.py @backend-team
+
+# Backend Core Modules - Require Lead Architect Review
+backend/modules/_core/ @lead-architect
+backend/modules/auth_guard.py @lead-architect
+backend/modules/observability.py @lead-architect @devops-team
+backend/modules/clients.py @lead-architect
+
+# Backend Features
+backend/modules/retrieval.py @ai-team
+backend/modules/agent.py @ai-team
+backend/modules/embeddings.py @ai-team
+backend/modules/answering.py @ai-team
+backend/modules/memory.py @ai-team
+backend/modules/chat*.py @ai-team
+
+# Backend Database & Infrastructure
+backend/database/ @devops-team
+backend/migrations/ @devops-team @lead-architect
+backend/main.py @lead-architect
+
+# Backend Tests
+backend/tests/ @qa-team
+backend/test_*.py @qa-team
+
+# Frontend Components
+frontend/components/ @frontend-team
+frontend/app/ @frontend-team
+frontend/lib/ @frontend-team @lead-architect
+
+# Frontend Auth & Security
+frontend/middleware.ts @lead-architect
+frontend/lib/supabase/ @lead-architect
+
+# CI/CD & DevOps
+.github/workflows/ @devops-team @ci-team
+scripts/ @devops-team
+Dockerfile @devops-team
+render.yaml @devops-team
+railway.json @devops-team
+
+# Configuration Files
+.env*.example @devops-team
+*.yaml @devops-team
+*.yml @devops-team
+requirements.txt @backend-team
+package.json @frontend-team
+
+# Documentation
+docs/architecture/ @lead-architect
+docs/ @documentation-team
+*.md @documentation-team
+
+# Root Configuration
+.cursorrules @lead-architect
+.gitignore @devops-team
+
+# Default - Require team lead approval
+* @lead-architect @backend-team @frontend-team

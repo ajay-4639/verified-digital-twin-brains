@@ -12,6 +12,9 @@ from modules.observability import (
     log_interaction, create_conversation
 )
 from modules.agent import run_agent_stream
+from modules.identity_gate import run_identity_gate
+from modules.owner_memory_store import create_clarification_thread
+from modules.memory_events import create_memory_event
 from langchain_core.messages import HumanMessage, AIMessage
 from datetime import datetime
 import re
@@ -36,6 +39,20 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["chat"])
+
+def _normalize_json(value):
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    if isinstance(value, list):
+        return [_normalize_json(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _normalize_json(v) for k, v in value.items()}
+    return str(value)
 
 @router.post("/chat/{twin_id}")
 @observe(name="chat_request")
@@ -98,6 +115,8 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
         # Don't raise, let stream generator handle it or default to None
         logger.error(f"Chat Setup Failed: {e}")
 
+    mode = request.mode or ("public" if user and user.get("role") == "visitor" else "owner")
+
     async def stream_generator():
         nonlocal conversation_id
         try:
@@ -122,17 +141,99 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
             from modules.graph_context import get_graph_stats
             graph_stats = get_graph_stats(twin_id)
             
+            # Identity Confidence Gate (deterministic)
+            history_for_gate = []
+            if raw_history:
+                for msg in raw_history[-6:]:
+                    history_for_gate.append({
+                        "role": msg.get("role"),
+                        "content": msg.get("content", "")
+                    })
+
+            gate = await run_identity_gate(
+                query=query,
+                history=history_for_gate,
+                twin_id=twin_id,
+                tenant_id=user.get("tenant_id") if user else None,
+                group_id=group_id,
+                mode=mode
+            )
+
+            # If clarification required, emit single clarify event and stop
+            if gate.get("decision") == "CLARIFY":
+                # Ensure conversation exists for audit trail
+                if not conversation_id:
+                    user_id = user.get("user_id") if user else None
+                    conv = create_conversation(twin_id, user_id, group_id=group_id)
+                    conversation_id = conv["id"]
+
+                # Create clarification thread
+                clarif = create_clarification_thread(
+                    twin_id=twin_id,
+                    tenant_id=user.get("tenant_id") if user else None,
+                    question=gate.get("question", ""),
+                    options=gate.get("options", []),
+                    memory_write_proposal=gate.get("memory_write_proposal", {}),
+                    original_query=query,
+                    conversation_id=conversation_id,
+                    mode=mode,
+                    requested_by="owner" if mode == "owner" else "public",
+                    created_by=user.get("user_id") if user else None
+                )
+
+                # Audit event for pending clarification
+                try:
+                    if user and user.get("tenant_id"):
+                        await create_memory_event(
+                            twin_id=twin_id,
+                            tenant_id=user.get("tenant_id"),
+                            event_type="owner_memory_pending",
+                            payload={
+                                "clarification_id": clarif.get("id") if clarif else None,
+                                "question": gate.get("question"),
+                                "topic": gate.get("topic"),
+                                "memory_type": gate.get("memory_type")
+                            },
+                            status="pending_review",
+                            source_type="chat_turn",
+                            source_id=conversation_id
+                        )
+                except Exception as e:
+                    logger.warning(f"Memory event pending log failed: {e}")
+
+                # Log interaction
+                log_interaction(conversation_id, "user", query)
+                log_interaction(conversation_id, "assistant", gate.get("question", ""))
+
+                clarify_event = {
+                    "type": "clarify",
+                    "clarification_id": clarif.get("id") if clarif else None,
+                    "question": gate.get("question"),
+                    "options": gate.get("options", []),
+                    "memory_write_proposal": gate.get("memory_write_proposal", {}),
+                    "status": "pending_owner",
+                    "conversation_id": conversation_id
+                }
+                yield json.dumps(clarify_event) + "\n"
+                return
+
+            owner_memory_context = gate.get("owner_memory_context", "")
+            owner_memory_refs = gate.get("owner_memory_refs", [])
+
             # DETECT REASONING INTENT (Simple Heuristic for now)
             # In production, use a classifier model
             is_reasoning_query = any(phrase in query.lower() for phrase in [
                 "would i ", "do i think", "what is my stance", "how do i feel"
             ])
+            # If owner memory is available, skip reasoning engine for stance queries
+            if owner_memory_refs:
+                is_reasoning_query = False
             
             if is_reasoning_query:
                 try:
                     from modules.reasoning_engine import ReasoningEngine
                     engine = ReasoningEngine(twin_id)
-                    trace = await engine.predict_stance(query)
+                    trace = await engine.predict_stance(query, context_context=owner_memory_context)
                     
                     full_response = trace.to_readable_trace()
                     confidence_score = trace.confidence_score
@@ -156,7 +257,8 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                     query=query,
                     history=langchain_history,
                     group_id=group_id,
-                    conversation_id=conversation_id
+                    conversation_id=conversation_id,
+                    owner_memory_context=owner_memory_context
                 ).__aiter__()
 
                 pending_task = None
@@ -214,18 +316,19 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
             graph_used = graph_stats["has_graph"] and len(citations) == 0
             
             # 3. Send metadata first (so frontend knows context is found)
-            metadata = {
+            metadata = _normalize_json({
                 "type": "metadata",
                 "citations": citations,
                 "confidence_score": confidence_score,
                 "conversation_id": conversation_id,
+                "owner_memory_refs": owner_memory_refs,
                 "graph_context": {
                     "has_graph": graph_stats["has_graph"],
                     "node_count": graph_stats["node_count"],
                     "graph_used": graph_used
                 },
                 "decision_trace": decision_trace
-            }
+            })
             yield json.dumps(metadata) + "\n"
             
             # 4. Send final content
@@ -236,6 +339,9 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                 fallback = "I don't have this specific information in my knowledge base."
                 print(f"[Chat] Fallback emitted: {fallback}")
                 yield json.dumps({"type": "content", "content": fallback}) + "\n"
+
+            # 5. Done event
+            yield json.dumps({"type": "done"}) + "\n"
             
             print(f"[Chat] Stream ended for twin_id={twin_id}")
 
@@ -368,6 +474,47 @@ async def chat_widget(twin_id: str, request: ChatWidgetRequest, req_raw: Request
         system_prompt += f"\n\n{style_guide}"
     
     history = get_messages(conversation_id)
+
+    # Identity gate for public/widget
+    gate = await run_identity_gate(
+        query=query,
+        history=[{"role": m.get("role"), "content": m.get("content", "")} for m in (history or [])[-6:]],
+        twin_id=twin_id,
+        tenant_id=None,
+        group_id=group_id,
+        mode="public"
+    )
+
+    if gate.get("decision") == "CLARIFY":
+        # Create clarification thread for owner to resolve
+        clarif = create_clarification_thread(
+            twin_id=twin_id,
+            tenant_id=None,
+            question=gate.get("question", ""),
+            options=gate.get("options", []),
+            memory_write_proposal=gate.get("memory_write_proposal", {}),
+            original_query=query,
+            conversation_id=conversation_id,
+            mode="public",
+            requested_by="public",
+            created_by=None
+        )
+
+        async def widget_clarify_stream():
+            yield json.dumps({
+                "type": "clarify",
+                "clarification_id": clarif.get("id") if clarif else None,
+                "question": gate.get("question"),
+                "options": gate.get("options", []),
+                "memory_write_proposal": gate.get("memory_write_proposal", {}),
+                "status": "pending_owner",
+                "conversation_id": conversation_id,
+                "session_id": session_id
+            }) + "\n"
+        return StreamingResponse(widget_clarify_stream(), media_type="text/event-stream")
+
+    owner_memory_context = gate.get("owner_memory_context", "")
+    owner_memory_refs = gate.get("owner_memory_refs", [])
     
     async def widget_stream_generator():
         final_content = ""
@@ -375,20 +522,28 @@ async def chat_widget(twin_id: str, request: ChatWidgetRequest, req_raw: Request
         confidence_score = 0.0
         sent_metadata = False
 
-        async for event in run_agent_stream(twin_id, query, history, system_prompt, group_id=group_id, conversation_id=conversation_id):
+        async for event in run_agent_stream(
+            twin_id,
+            query,
+            history,
+            system_prompt,
+            group_id=group_id,
+            conversation_id=conversation_id,
+            owner_memory_context=owner_memory_context
+        ):
             if "tools" in event:
                 citations = event["tools"].get("citations", citations)
                 confidence_score = event["tools"].get("confidence_score", confidence_score)
                 
                 if not sent_metadata:
-                    metadata = ChatMetadata(
-                        confidence_score=confidence_score,
-                        citations=citations,
-                        conversation_id=conversation_id
-                    )
-                    # Include session_id in the first metadata chunk
-                    output = metadata.model_dump()
-                    output["session_id"] = session_id
+                    output = {
+                        "type": "answer_metadata",
+                        "confidence_score": confidence_score,
+                        "citations": citations,
+                        "conversation_id": conversation_id,
+                        "owner_memory_refs": owner_memory_refs,
+                        "session_id": session_id
+                    }
                     yield json.dumps(output) + "\n"
                     sent_metadata = True
 
@@ -396,7 +551,7 @@ async def chat_widget(twin_id: str, request: ChatWidgetRequest, req_raw: Request
                 msg = event["agent"]["messages"][-1]
                 if isinstance(msg, AIMessage):
                     final_content += msg.content
-                    yield json.dumps({"type": "content", "content": msg.content}) + "\n"
+                    yield json.dumps({"type": "answer_token", "content": msg.content}) + "\n"
 
         # Record usage
         record_request(session_id, "session", "requests_per_hour")
@@ -455,6 +610,7 @@ async def public_chat_endpoint(twin_id: str, token: str, request: PublicChatRequ
     except Exception as e:
         print(f"Warning: Could not emit event or check triggers: {e}")
     
+    conversation_id = None
     # Build conversation history
     history = []
     if request.conversation_history:
@@ -463,10 +619,54 @@ async def public_chat_endpoint(twin_id: str, token: str, request: PublicChatRequ
                 history.append(HumanMessage(content=msg.get("content", "")))
             elif msg.get("role") == "assistant":
                 history.append(AIMessage(content=msg.get("content", "")))
-    
+
+    # Identity gate for public chat
+    gate = await run_identity_gate(
+        query=request.message,
+        history=[{"role": "user", "content": m.content} for m in history[-6:]] if history else [],
+        twin_id=twin_id,
+        tenant_id=None,
+        group_id=group_id,
+        mode="public"
+    )
+
+    if gate.get("decision") == "CLARIFY":
+        clarif = create_clarification_thread(
+            twin_id=twin_id,
+            tenant_id=None,
+            question=gate.get("question", ""),
+            options=gate.get("options", []),
+            memory_write_proposal=gate.get("memory_write_proposal", {}),
+            original_query=request.message,
+            conversation_id=None,
+            mode="public",
+            requested_by="public",
+            created_by=None
+        )
+        return {
+            "status": "queued",
+            "message": "Queued for owner confirmation.",
+            "clarification_id": clarif.get("id") if clarif else None,
+            "question": gate.get("question"),
+            "options": gate.get("options", [])
+        }
+
+    owner_memory_context = gate.get("owner_memory_context", "")
+    owner_memory_refs = gate.get("owner_memory_refs", [])
+
     try:
         final_response = ""
-        async for event in run_agent_stream(twin_id, request.message, history, group_id=group_id, conversation_id=conversation_id):
+        citations = []
+        async for event in run_agent_stream(
+            twin_id,
+            request.message,
+            history,
+            group_id=group_id,
+            conversation_id=conversation_id,
+            owner_memory_context=owner_memory_context
+        ):
+            if "tools" in event:
+                citations = event["tools"].get("citations", citations)
             if "agent" in event:
                 msg = event["agent"]["messages"][-1]
                 if isinstance(msg, AIMessage) and msg.content:
@@ -486,7 +686,13 @@ async def public_chat_endpoint(twin_id: str, token: str, request: PublicChatRequ
             if acknowledgments:
                 final_response += "\n\n" + " ".join(acknowledgments)
         
-        return {"response": final_response}
+        return {
+            "status": "answer",
+            "response": final_response,
+            "citations": citations,
+            "owner_memory_refs": owner_memory_refs,
+            "used_owner_memory": bool(owner_memory_refs)
+        }
     except Exception as e:
         print(f"Error in public chat: {e}")
         import traceback

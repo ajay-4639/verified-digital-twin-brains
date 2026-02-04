@@ -1,6 +1,8 @@
 'use client';
 
 import React, { useRef, useEffect, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 export interface Message {
   role: 'user' | 'assistant';
@@ -102,7 +104,13 @@ const MessageList = React.memo(({ messages, loading, isSearching }: MessageListP
                 ? 'bg-gradient-to-br from-indigo-600 via-indigo-600 to-purple-600 text-white shadow-xl shadow-indigo-200/50 rounded-tr-none'
                 : 'bg-white text-slate-800 border border-slate-100 shadow-lg shadow-slate-100/50 rounded-tl-none hover:shadow-xl'
                 }`}>
-                <p className="whitespace-pre-wrap font-medium">{msg.content}</p>
+                {msg.role === 'assistant' ? (
+                  <div className="prose prose-sm prose-slate max-w-none prose-p:my-1 prose-headings:my-2 prose-pre:bg-slate-800 prose-pre:text-slate-100 prose-code:text-indigo-600 prose-code:bg-indigo-50 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:before:content-none prose-code:after:content-none">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                  </div>
+                ) : (
+                  <p className="whitespace-pre-wrap font-medium">{msg.content}</p>
+                )}
 
                 {/* Copy button - absolute positioned */}
                 {msg.content && msg.role === 'assistant' && (

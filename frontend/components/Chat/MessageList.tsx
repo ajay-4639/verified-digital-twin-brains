@@ -59,7 +59,7 @@ function CopyButton({ content }: { content: string }) {
   return (
     <button
       onClick={handleCopy}
-      className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-all"
+      className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 dark:hover:text-slate-300 transition-all"
       aria-label="Copy message"
       title="Copy to clipboard"
     >
@@ -73,6 +73,70 @@ function CopyButton({ content }: { content: string }) {
         </svg>
       )}
     </button>
+  );
+}
+
+// Message reactions for AI feedback
+function MessageReactions({ messageId }: { messageId: number }) {
+  const [reaction, setReaction] = useState<'up' | 'down' | null>(null);
+
+  const handleReaction = (type: 'up' | 'down') => {
+    if (reaction === type) {
+      setReaction(null); // Toggle off
+    } else {
+      setReaction(type);
+      // TODO: Send reaction to backend for analytics
+      console.log(`[Reaction] Message ${messageId}: ${type}`);
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all">
+      <button
+        onClick={() => handleReaction('up')}
+        className={`p-1 rounded transition-colors ${reaction === 'up'
+          ? 'text-green-500 bg-green-50 dark:bg-green-900/30'
+          : 'text-slate-400 hover:text-green-500 hover:bg-green-50 dark:hover:bg-green-900/30'
+          }`}
+        aria-label="Helpful response"
+        title="This was helpful"
+      >
+        <svg className="w-4 h-4" fill={reaction === 'up' ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5" />
+        </svg>
+      </button>
+      <button
+        onClick={() => handleReaction('down')}
+        className={`p-1 rounded transition-colors ${reaction === 'down'
+          ? 'text-red-500 bg-red-50 dark:bg-red-900/30'
+          : 'text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/30'
+          }`}
+        aria-label="Not helpful response"
+        title="This was not helpful"
+      >
+        <svg className="w-4 h-4" fill={reaction === 'down' ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-10h2a2 2 0 012 2v6a2 2 0 01-2 2h-2.5" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+// Skeleton loader for messages
+export function MessageSkeleton() {
+  return (
+    <div className="flex justify-start animate-pulse">
+      <div className="flex gap-4 max-w-[80%]">
+        <div className="w-10 h-10 rounded-2xl bg-slate-200 dark:bg-slate-700" />
+        <div className="space-y-3 flex-1">
+          <div className="bg-slate-200 dark:bg-slate-700 rounded-3xl rounded-tl-none p-5 space-y-2">
+            <div className="h-4 bg-slate-300 dark:bg-slate-600 rounded w-3/4" />
+            <div className="h-4 bg-slate-300 dark:bg-slate-600 rounded w-1/2" />
+            <div className="h-4 bg-slate-300 dark:bg-slate-600 rounded w-2/3" />
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -123,13 +187,17 @@ const MessageList = React.memo(({ messages, loading, isSearching }: MessageListP
               {/* Timestamp and metadata row */}
               <div className="flex items-center gap-2 px-1">
                 {msg.timestamp && (
-                  <span className="text-[10px] text-slate-400 font-medium">
+                  <span className="text-[10px] text-slate-400 dark:text-slate-500 font-medium">
                     {formatTimestamp(msg.timestamp)}
                   </span>
                 )}
 
                 {msg.role === 'user' && msg.content && (
                   <CopyButton content={msg.content} />
+                )}
+
+                {msg.role === 'assistant' && (
+                  <MessageReactions messageId={idx} />
                 )}
               </div>
 

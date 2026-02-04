@@ -7,6 +7,7 @@ import { useTwin } from '@/lib/context/TwinContext';
 import { TwinSelector } from './ui/TwinSelector';
 import { createClient } from '@/lib/supabase/client';
 import { SIDEBAR_CONFIG, APP_NAME, APP_TAGLINE } from '@/lib/navigation/config';
+import { ThemeToggle } from '@/lib/context/ThemeContext';
 import type { NavSection, NavItem } from '@/lib/navigation/types';
 
 // --- Icons ---
@@ -137,9 +138,12 @@ export default function Sidebar() {
               <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">System</span>
               <span className="text-xs font-bold text-indigo-400">Online</span>
             </div>
-            <div className="mt-1 flex items-center gap-2">
-              <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
-              <span className="text-[11px] font-medium text-slate-500">Ready</span>
+            <div className="mt-1 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
+                <span className="text-[11px] font-medium text-slate-500">Ready</span>
+              </div>
+              <ThemeToggle className="text-slate-400" />
             </div>
             <button
               onClick={handleLogout}

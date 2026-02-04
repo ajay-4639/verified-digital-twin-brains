@@ -25,6 +25,7 @@ from modules._core.scribe_engine import extract_structured_output, score_confide
 from modules._core.response_evaluator import ResponseEvaluator
 from modules._core.repair_strategies import RepairManager
 from modules._core.registry_loader import get_specialization_manifest
+from modules._core.interview_controller import InterviewController, InterviewStage
 from modules.specializations import get_specialization
 from langchain_core.messages import AIMessage
 
@@ -80,6 +81,9 @@ async def cognitive_interview(
     request: InterviewRequest,
     user=Depends(require_tenant)
 ):
+    spec = get_specialization()
+    host_policy = _load_host_policy(spec.name)
+
     # Validate twin belongs to tenant and get user context
     twin = require_twin_access(twin_id, user)
     tenant_id = user["tenant_id"]
@@ -96,6 +100,7 @@ async def cognitive_interview(
     session = InterviewController.get_or_create_session(twin_id, conversation_id)
     session_id = session.get("id")
     stage = InterviewController.get_stage(session)
+    stage_label = stage.value.upper()
     
     # Get conversation history
     history = get_messages(conversation_id)
@@ -175,13 +180,13 @@ async def cognitive_interview(
             return InterviewResponse(
                 response=f"Here's what I've learned about you:\n\n{full_knowledge}\n\nWhat would you like to explore or add?",
                 conversation_id=conversation_id, session_id=session_id,
-                stage=stage.value, progress={"slots_filled": len(knowledge_items)}
+                stage=stage_label, progress={"slots_filled": len(knowledge_items)}
             )
         else:
             return InterviewResponse(
                 response="Nothing yet. Let's start — what's this twin for?",
                 conversation_id=conversation_id, session_id=session_id,
-                stage=InterviewStage.INTENT_CAPTURE.value
+                stage=InterviewStage.INTENT_CAPTURE.value.upper()
             )
     
     # "Start fresh" - Clear and go
@@ -194,7 +199,7 @@ async def cognitive_interview(
         return InterviewResponse(
             response="Done. Starting fresh.\n\nWhat's this twin for?",
             conversation_id=conversation_id, session_id=session_id,
-            stage=InterviewStage.INTENT_CAPTURE.value
+            stage=InterviewStage.INTENT_CAPTURE.value.upper()
         )
     
     # "Continue" - Just proceed
@@ -206,7 +211,7 @@ async def cognitive_interview(
             return InterviewResponse(
                 response=question,
                 conversation_id=conversation_id, session_id=session_id,
-                stage=InterviewStage.DEEP_INTERVIEW.value,
+                stage=InterviewStage.DEEP_INTERVIEW.value.upper(),
                 suggested_question=question
             )
             
@@ -548,7 +553,7 @@ Keep responses brief and conversational."""
         response=final_response,
         conversation_id=conversation_id,
         session_id=session_id,
-        stage=next_stage,
+        stage=next_stage.upper() if isinstance(next_stage, str) else stage_label,
         intent_summary=intent_summary or session.get("intent_summary"),
         next_slot=get_next_slot(host_policy, filled_slots),
         suggested_question=suggested_question,

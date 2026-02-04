@@ -73,6 +73,8 @@ export function ChatTab({ twinId, twinName, onSendMessage }: ChatTabProps) {
         setInput('');
         setIsTyping(true);
         setLastDebugResult(null); // Clear previous debug info
+        // Add assistant placeholder for streaming
+        setMessages(prev => [...prev, { role: 'assistant', content: '', timestamp: new Date() }]);
 
         // Trigger Debug Retrieval if enabled
         if (showDebug) {
@@ -101,36 +103,79 @@ export function ChatTab({ twinId, twinName, onSendMessage }: ChatTabProps) {
 
         try {
             // Call actual API or use provided handler
-            let response: string;
             if (onSendMessage) {
-                response = await onSendMessage(originalInput);
+                const response = await onSendMessage(originalInput);
+                setMessages(prev => {
+                    const next = [...prev];
+                    next[next.length - 1] = { ...next[next.length - 1], content: response };
+                    return next;
+                });
             } else {
-                // Default: call backend chat API
+                // Default: call backend chat API (streaming)
                 const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
-                const res = await fetch(`${backendUrl}/chat`, {
+                const res = await fetch(`${backendUrl}/chat/${twinId}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        twin_id: twinId,
-                        message: originalInput,
-                        stream: false
+                        query: originalInput,
+                        mode: 'owner'
                     }),
                 });
-                const data = await res.json();
-                response = data.response || data.message || "I couldn't process that request.";
+                if (!res.ok) {
+                    throw new Error(`Request failed (${res.status})`);
+                }
+                if (!res.body) throw new Error('No response body');
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let done = false;
+                while (!done) {
+                    const { value, done: readerDone } = await reader.read();
+                    done = readerDone;
+                    if (value) {
+                        const chunk = decoder.decode(value, { stream: true });
+                        const lines = chunk.split('\n');
+                        for (const line of lines) {
+                            if (!line.trim()) continue;
+                            try {
+                                const data = JSON.parse(line);
+                                if (data.type === 'clarify') {
+                                    setMessages(prev => {
+                                        const next = [...prev];
+                                        next[next.length - 1] = {
+                                            ...next[next.length - 1],
+                                            content: `${data.question || 'Clarification needed.'} (Answer in Training tab.)`
+                                        };
+                                        return next;
+                                    });
+                                    done = true;
+                                    break;
+                                }
+                                if (data.type === 'answer_token' || data.type === 'content') {
+                                    setMessages(prev => {
+                                        const next = [...prev];
+                                        next[next.length - 1] = {
+                                            ...next[next.length - 1],
+                                            content: next[next.length - 1].content + (data.content || '')
+                                        };
+                                        return next;
+                                    });
+                                }
+                            } catch (e) {
+                                console.error('Error parsing stream line:', e);
+                            }
+                        }
+                    }
+                }
             }
-
-            setMessages(prev => [...prev, {
-                role: 'assistant',
-                content: response,
-                timestamp: new Date()
-            }]);
         } catch (error) {
-            setMessages(prev => [...prev, {
-                role: 'assistant',
-                content: "Sorry, I encountered an error. Please try again.",
-                timestamp: new Date()
-            }]);
+            setMessages(prev => {
+                const next = [...prev];
+                next[next.length - 1] = {
+                    ...next[next.length - 1],
+                    content: "Sorry, I encountered an error. Please try again."
+                };
+                return next;
+            });
         } finally {
             setIsTyping(false);
         }

@@ -31,7 +31,8 @@ from routers import (
     interview,
     api_keys,  # Tenant-scoped API keys management
     debug_retrieval, # New debug router
-    verify
+    verify,
+    owner_memory
 )
 from modules.specializations import get_specialization
 
@@ -95,6 +96,7 @@ app.include_router(interview.router)
 app.include_router(api_keys.router)
 app.include_router(debug_retrieval.router)
 app.include_router(verify.router)
+app.include_router(owner_memory.router)
 
 
 

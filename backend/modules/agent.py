@@ -156,7 +156,14 @@ class TwinState(TypedDict):
     confidence_score: float
     citations: List[str]
 
-def create_twin_agent(twin_id: str, group_id: Optional[str] = None, system_prompt_override: str = None, full_settings: dict = None, graph_context: str = ""):
+def create_twin_agent(
+    twin_id: str,
+    group_id: Optional[str] = None,
+    system_prompt_override: str = None,
+    full_settings: dict = None,
+    graph_context: str = "",
+    owner_memory_context: str = ""
+):
     # Initialize the LLM
     api_key = os.getenv("OPENAI_API_KEY")
     
@@ -279,6 +286,12 @@ def create_twin_agent(twin_id: str, group_id: Optional[str] = None, system_promp
                 persona_section += f"\n            - CORE WORLDVIEW / OPINIONS (Always stay consistent with these):\n              {opinions_text}"
 
             general_knowledge_note = "You may use general knowledge if allowed in settings." if general_knowledge_allowed else "Do NOT make things up or use general knowledge - only respond with verified information."
+
+            owner_memory_block = "OWNER MEMORY (Authoritative for stance, preferences, lens, tone):\n"
+            if owner_memory_context:
+                owner_memory_block += owner_memory_context
+            else:
+                owner_memory_block += "- None available for this query."
             
             # Check if user wants brevity from current query or history
             brevity_instruction = ""
@@ -293,7 +306,11 @@ def create_twin_agent(twin_id: str, group_id: Optional[str] = None, system_promp
 
             {graph_context}
 
+            {owner_memory_block}
+
             CRITICAL OPERATING PROCEDURES:
+            - Owner Memory is authoritative for stance/opinion/preferences/lens/tone. Never invent beliefs.
+            - World knowledge is for factual support only and must be cited.
             0. **MEMORIZED KNOWLEDGE FIRST**: If the user's question relates to any topic in your MEMORIZED KNOWLEDGE above, answer directly from that memory. Only call search_knowledge_base if the topic is NOT in your memorized knowledge.
             1. **Brevity First**: Default to concise, one-line answers when possible. Only expand when explicitly asked for details.
             2. **Context Awareness**: If the user's query is ambiguous, use conversation history to understand what they're referring to.
@@ -429,7 +446,15 @@ except ImportError:
 
 
 @observe(name="agent_response")
-async def run_agent_stream(twin_id: str, query: str, history: List[BaseMessage] = None, system_prompt: str = None, group_id: Optional[str] = None, conversation_id: Optional[str] = None):
+async def run_agent_stream(
+    twin_id: str,
+    query: str,
+    history: List[BaseMessage] = None,
+    system_prompt: str = None,
+    group_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    owner_memory_context: str = ""
+):
     """
     Runs the agent and yields events from the graph.
     
@@ -493,7 +518,14 @@ async def run_agent_stream(twin_id: str, query: str, history: List[BaseMessage] 
         except Exception as e:
             print(f"[GraphRAG] Retrieval failed, falling back to RAG-lite. Error: {e}")
 
-    agent = create_twin_agent(twin_id, group_id=group_id, system_prompt_override=system_prompt, full_settings=settings, graph_context=graph_context)
+    agent = create_twin_agent(
+        twin_id,
+        group_id=group_id,
+        system_prompt_override=system_prompt,
+        full_settings=settings,
+        graph_context=graph_context,
+        owner_memory_context=owner_memory_context
+    )
     
     initial_messages = history or []
     initial_messages.append(HumanMessage(content=query))

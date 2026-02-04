@@ -7,6 +7,7 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[str] = None
     group_id: Optional[str] = None  # NEW: Allow group override
     metadata: Optional[Dict[str, Any]] = None
+    mode: Optional[str] = None  # "owner" | "public"
 
 class ChatMetadata(BaseModel):
     type: str = "metadata"
@@ -307,6 +308,38 @@ class ChatWidgetRequest(BaseModel):
 class PublicChatRequest(BaseModel):
     message: str
     conversation_history: Optional[List[Dict[str, str]]] = None
+
+# Owner Memory + Clarifications
+
+class OwnerMemorySchema(BaseModel):
+    id: str
+    twin_id: str
+    tenant_id: str
+    topic_normalized: str
+    memory_type: str
+    value: str
+    stance: Optional[str] = None
+    intensity: Optional[int] = None
+    confidence: Optional[float] = None
+    status: str
+    created_at: Optional[datetime] = None
+
+class ClarificationThreadSchema(BaseModel):
+    id: str
+    twin_id: str
+    tenant_id: str
+    status: str
+    mode: str
+    original_query: Optional[str] = None
+    question: str
+    options: Optional[List[Dict[str, Any]]] = None
+    memory_write_proposal: Optional[Dict[str, Any]] = None
+    owner_memory_id: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+class ClarificationResolveRequest(BaseModel):
+    answer: str
+    selected_option: Optional[str] = None
 
 # Phase 9: Verification & Governance Schemas
 

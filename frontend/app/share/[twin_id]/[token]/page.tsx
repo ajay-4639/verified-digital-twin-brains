@@ -8,6 +8,8 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 interface Message {
     role: 'user' | 'assistant';
     content: string;
+    citations?: string[];
+    used_owner_memory?: boolean;
 }
 
 export default function PublicSharePage() {
@@ -68,7 +70,16 @@ export default function PublicSharePage() {
 
             if (response.ok) {
                 const data = await response.json();
-                setMessages(prev => [...prev, { role: 'assistant', content: data.response }]);
+                if (data.status === 'queued') {
+                    setMessages(prev => [...prev, { role: 'assistant', content: 'Queued for owner confirmation. Please retry shortly.' }]);
+                } else {
+                    setMessages(prev => [...prev, {
+                        role: 'assistant',
+                        content: data.response || 'No response',
+                        citations: data.citations || [],
+                        used_owner_memory: Boolean(data.used_owner_memory)
+                    }]);
+                }
             } else {
                 setMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, I encountered an error processing your request.' }]);
             }
@@ -152,6 +163,20 @@ export default function PublicSharePage() {
                                     }`}
                             >
                                 <p className="whitespace-pre-wrap">{message.content}</p>
+                                {message.role === 'assistant' && (
+                                    <div className="mt-2 flex flex-wrap gap-2 text-[10px] uppercase tracking-wider">
+                                        {message.used_owner_memory && (
+                                            <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                                Used Owner Memory
+                                            </span>
+                                        )}
+                                        {message.citations?.map((_, i) => (
+                                            <span key={i} className="px-2 py-0.5 rounded-full bg-white/10 text-slate-300 border border-white/10">
+                                                Source {i + 1}
+                                            </span>
+                                        ))}
+                                    </div>
+                                )}
                             </div>
                         </div>
                     ))}

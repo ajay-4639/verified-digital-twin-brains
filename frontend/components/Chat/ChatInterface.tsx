@@ -13,13 +13,17 @@ export default function ChatInterface({
   conversationId,
   onConversationStarted,
   resetKey,
-  tenantId
+  tenantId,
+  mode = 'owner',
+  onMemoryUpdated
 }: {
   twinId: string;
   conversationId?: string | null;
   onConversationStarted?: (id: string) => void;
   resetKey?: number;
   tenantId?: string | null;
+  mode?: 'owner' | 'public' | 'training';
+  onMemoryUpdated?: () => void;
 }) {
   const { user } = useTwin();
   const [messages, setMessages] = useState<Message[]>([
@@ -33,6 +37,9 @@ export default function ChatInterface({
   const [isSearching, setIsSearching] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
   const [lastUserMessage, setLastUserMessage] = useState<string | null>(null);
+  const [clarification, setClarification] = useState<any | null>(null);
+  const [clarifyAnswer, setClarifyAnswer] = useState('');
+  const [clarifyOption, setClarifyOption] = useState<string | null>(null);
 
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -155,6 +162,9 @@ export default function ChatInterface({
       setMessages((prev) => [...prev, userMsg]);
       setInput('');
     }
+    setClarification(null);
+    setClarifyAnswer('');
+    setClarifyOption(null);
     setLastUserMessage(text);
     setLastError(null);
     setLoading(true);
@@ -181,6 +191,7 @@ export default function ChatInterface({
         body: JSON.stringify({
           query: text,
           conversation_id: conversationId || null,
+          mode: mode === 'training' ? 'owner' : mode,
         }),
         signal: abortRef.current.signal
       });
@@ -210,7 +221,18 @@ export default function ChatInterface({
             if (!line.trim()) continue;
             try {
               const data = JSON.parse(line);
-              if (data.type === 'metadata') {
+              if (data.type === 'clarify') {
+                setIsSearching(false);
+                setLoading(false);
+                setClarification(data);
+                setMessages((prev) => {
+                  const last = [...prev];
+                  const lastMsg = { ...last[last.length - 1] };
+                  lastMsg.content = data.question || 'I need clarification.';
+                  last[last.length - 1] = lastMsg;
+                  return last;
+                });
+              } else if (data.type === 'answer_metadata' || data.type === 'metadata') {
                 setIsSearching(false); // Found context, now generating
                 if (data.conversation_id && !conversationId && onConversationStarted) {
                   onConversationStarted(data.conversation_id);
@@ -223,10 +245,12 @@ export default function ChatInterface({
                   lastMsg.confidence_score = data.confidence_score;
                   lastMsg.citations = data.citations;
                   lastMsg.graph_used = graphUsed;
+                  lastMsg.owner_memory_refs = data.owner_memory_refs || [];
+                  lastMsg.used_owner_memory = Boolean(data.owner_memory_refs?.length);
                   last[last.length - 1] = lastMsg;
                   return last;
                 });
-              } else if (data.type === 'content') {
+              } else if (data.type === 'answer_token' || data.type === 'content') {
                 setMessages((prev) => {
                   const last = [...prev];
                   const lastMsg = { ...last[last.length - 1] };
@@ -234,6 +258,8 @@ export default function ChatInterface({
                   last[last.length - 1] = lastMsg;
                   return last;
                 });
+              } else if (data.type === 'done') {
+                // no-op
               }
             } catch (e) {
               console.error('Error parsing stream line:', e);
@@ -321,6 +347,68 @@ export default function ChatInterface({
 
       {/* Input */}
       <div className="p-6 bg-white/80 backdrop-blur-sm border-t border-slate-100">
+        {clarification && mode !== 'public' && (
+          <div className="mb-4 rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-800">
+            <div className="font-bold text-[10px] uppercase tracking-wider mb-2">Clarification Needed</div>
+            <div className="mb-2">{clarification.question}</div>
+            {Array.isArray(clarification.options) && clarification.options.length > 0 && (
+              <div className="flex flex-col gap-2 mb-2">
+                {clarification.options.map((opt: any, idx: number) => (
+                  <label key={idx} className="flex items-center gap-2 text-xs">
+                    <input
+                      type="radio"
+                      name="clarify-option"
+                      value={opt.label}
+                      checked={clarifyOption === opt.label}
+                      onChange={() => setClarifyOption(opt.label)}
+                    />
+                    <span className="font-semibold">{opt.label}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+            <input
+              type="text"
+              value={clarifyAnswer}
+              onChange={(e) => setClarifyAnswer(e.target.value)}
+              placeholder="Answer in one sentence..."
+              className="w-full bg-white border border-indigo-200 rounded-xl px-3 py-2 text-xs mb-2"
+            />
+            <button
+              onClick={async () => {
+                try {
+                  const token = await getAuthToken();
+                  if (!token) throw new Error('Not authenticated');
+                  const res = await fetch(`${API_BASE_URL}/twins/${twinId}/clarifications/${clarification.clarification_id}/resolve`, {
+                    method: 'POST',
+                    headers: {
+                      'Authorization': `Bearer ${token}`,
+                      'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                      answer: clarifyAnswer || clarifyOption || '',
+                      selected_option: clarifyOption || undefined
+                    })
+                  });
+                  if (!res.ok) {
+                    throw new Error(`Resolve failed (${res.status})`);
+                  }
+                  setClarification(null);
+                  setClarifyAnswer('');
+                  setClarifyOption(null);
+                  onMemoryUpdated?.();
+                  setMessages((prev) => [...prev, { role: 'assistant', content: 'Saved. Ask again and I will answer using your memory.' }]);
+                } catch (err) {
+                  console.error(err);
+                  setMessages((prev) => [...prev, { role: 'assistant', content: 'Failed to save clarification. Please retry.' }]);
+                }
+              }}
+              className="px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-white bg-indigo-600 rounded-xl"
+            >
+              Save Memory
+            </button>
+          </div>
+        )}
         {lastError && (
           <div className="mb-4 flex items-center justify-between gap-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
             <span>{lastError}</span>

@@ -6,6 +6,8 @@ export interface Message {
   citations?: string[];
   confidence_score?: number;
   graph_used?: boolean;
+  owner_memory_refs?: string[];
+  used_owner_memory?: boolean;
 }
 
 interface MessageListProps {
@@ -45,8 +47,14 @@ const MessageList = React.memo(({ messages, loading, isSearching }: MessageListP
                 <p className="whitespace-pre-wrap font-medium">{msg.content}</p>
               </div>
 
-              {msg.role === 'assistant' && (msg.citations || msg.confidence_score !== undefined || msg.graph_used) && (
+              {msg.role === 'assistant' && (msg.citations || msg.confidence_score !== undefined || msg.graph_used || msg.used_owner_memory) && (
                 <div className="flex flex-wrap gap-2 px-1">
+                  {msg.used_owner_memory && (
+                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black border uppercase tracking-wider bg-emerald-50 text-emerald-700 border-emerald-100">
+                      <span>🧠</span>
+                      Used Owner Memory
+                    </div>
+                  )}
                   {msg.graph_used && (
                     <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black border uppercase tracking-wider bg-indigo-50 text-indigo-700 border-indigo-100">
                       <span>💡</span>

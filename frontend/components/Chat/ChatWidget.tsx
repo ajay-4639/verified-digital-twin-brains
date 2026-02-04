@@ -8,6 +8,7 @@ interface Message {
   content: string;
   citations?: string[];
   confidence_score?: number;
+  owner_memory_refs?: string[];
 }
 
 interface ChatWidgetProps {
@@ -139,7 +140,14 @@ export default function ChatWidget({
             if (!line.trim()) continue;
             try {
               const data = JSON.parse(line);
-              if (data.type === 'metadata') {
+              if (data.type === 'clarify') {
+                setLoading(false);
+                setMessages((prev) => {
+                  const last = [...prev];
+                  last[last.length - 1].content = `${data.question || 'Clarification needed.'} (Queued for owner confirmation.)`;
+                  return last;
+                });
+              } else if (data.type === 'answer_metadata' || data.type === 'metadata') {
                 if (data.conversation_id && !conversationId) {
                   setConversationId(data.conversation_id);
                 }
@@ -148,10 +156,11 @@ export default function ChatWidget({
                   const lastMsg = { ...last[last.length - 1] };
                   lastMsg.confidence_score = data.confidence_score;
                   lastMsg.citations = data.citations;
+                  lastMsg.owner_memory_refs = data.owner_memory_refs || [];
                   last[last.length - 1] = lastMsg;
                   return last;
                 });
-              } else if (data.type === 'content') {
+              } else if (data.type === 'answer_token' || data.type === 'content') {
                 setMessages((prev) => {
                   const last = [...prev];
                   const lastMsg = { ...last[last.length - 1] };

@@ -7,8 +7,10 @@ import { ConsoleLayout } from '@/components/console/ConsoleLayout';
 import { OverviewTab } from '@/components/console/tabs/OverviewTab';
 import { KnowledgeTab } from '@/components/console/tabs/KnowledgeTab';
 import { ChatTab } from '@/components/console/tabs/ChatTab';
+import { TrainingTab } from '@/components/console/tabs/TrainingTab';
 import { EscalationsTab } from '@/components/console/tabs/EscalationsTab';
 import { PublishTab } from '@/components/console/tabs/PublishTab';
+import { PublicChatTab } from '@/components/console/tabs/PublicChatTab';
 import { ActionsTab } from '@/components/console/tabs/ActionsTab';
 import { SettingsTab } from '@/components/console/tabs/SettingsTab';
 
@@ -170,6 +172,8 @@ function TwinConsoleContent({ twinId }: { twinId: string }) {
                 return <KnowledgeTab twinId={twinId} />;
             case 'chat':
                 return <ChatTab twinId={twinId} twinName={twin.name} />;
+            case 'training':
+                return <TrainingTab twinId={twinId} />;
             case 'escalations':
                 return <EscalationsTab twinId={twinId} />;
             case 'publish':
@@ -180,6 +184,14 @@ function TwinConsoleContent({ twinId }: { twinId: string }) {
                         isPublic={twin.is_public}
                         shareLink={twin.share_token ? `/share/${twinId}/${twin.share_token}` : undefined}
                         onTogglePublic={handleTogglePublic}
+                    />
+                );
+            case 'public-chat':
+                return (
+                    <PublicChatTab
+                        twinId={twinId}
+                        shareToken={twin.share_token}
+                        isPublic={twin.is_public}
                     />
                 );
             case 'actions':

@@ -52,23 +52,26 @@ export function PublishTab({
         fetchStatus();
     }, [twinId]);
 
-    const defaultShareLink = shareLink || `${typeof window !== 'undefined' ? window.location.origin : ''}/share/${twinId}`;
+    const defaultShareLink = shareLink || '';
+    const canShare = Boolean(defaultShareLink);
 
-    const embedCode = `<iframe 
+    const embedCode = canShare ? `<iframe 
   src="${defaultShareLink}/embed" 
   width="400" 
   height="600" 
   frameborder="0"
   style="border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);"
-></iframe>`;
+></iframe>` : '<!-- Enable sharing to generate embed code -->';
 
     const handleCopyLink = async () => {
+        if (!canShare) return;
         await navigator.clipboard.writeText(defaultShareLink);
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
     };
 
     const handleCopyEmbed = async () => {
+        if (!canShare) return;
         await navigator.clipboard.writeText(embedCode);
         setEmbedCopied(true);
         setTimeout(() => setEmbedCopied(false), 2000);
@@ -150,12 +153,13 @@ export function PublishTab({
                         <div className="flex gap-2">
                             <input
                                 type="text"
-                                value={defaultShareLink}
+                                value={defaultShareLink || 'Share link not generated yet'}
                                 readOnly
                                 className="flex-1 px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-white text-sm"
                             />
                             <button
                                 onClick={handleCopyLink}
+                                disabled={!canShare}
                                 className={`px-4 py-3 text-sm font-medium rounded-xl transition-colors ${copied
                                     ? 'bg-emerald-500/20 text-emerald-400'
                                     : 'bg-white/10 text-white hover:bg-white/15'

@@ -24,12 +24,20 @@ interface Twin {
     specialization_id: string;
 }
 
+interface ShareLinkInfo {
+    twin_id: string;
+    share_token: string | null;
+    share_url: string | null;
+    public_share_enabled: boolean;
+}
+
 function TwinConsoleContent({ twinId }: { twinId: string }) {
     const searchParams = useSearchParams();
     const router = useRouter();
     const supabase = getSupabaseClient();
 
     const [twin, setTwin] = useState<Twin | null>(null);
+    const [shareInfo, setShareInfo] = useState<ShareLinkInfo | null>(null);
     const [loading, setLoading] = useState(true);
     const [stats, setStats] = useState({
         sources: 0,
@@ -65,6 +73,21 @@ function TwinConsoleContent({ twinId }: { twinId: string }) {
             }
             const data = await response.json();
             setTwin(data);
+
+            // Fetch share link info (canonical)
+            try {
+                const shareRes = await fetch(`${backendUrl}/twins/${twinId}/share-link`, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+                if (shareRes.ok) {
+                    const shareData = await shareRes.json();
+                    setShareInfo(shareData);
+                }
+            } catch (shareErr) {
+                console.warn('Failed to fetch share link info:', shareErr);
+            }
 
             // Fetch stats
             const { count: sourceCount } = await supabase
@@ -109,7 +132,7 @@ function TwinConsoleContent({ twinId }: { twinId: string }) {
             // Use authenticated fetch (assuming Supabase session is handled by the fetch wrapper or direct useAuthFetch)
             const { data: { session } } = await supabase.auth.getSession();
 
-            const res = await fetch(`${backendUrl}/twins/${twinId}`, {
+            const res = await fetch(`${backendUrl}/twins/${twinId}/sharing`, {
                 method: 'PATCH',
                 headers: {
                     'Content-Type': 'application/json',
@@ -123,11 +146,39 @@ function TwinConsoleContent({ twinId }: { twinId: string }) {
                 throw new Error(errorData.detail?.message || 'Failed to update twin');
             }
 
-            // Update local state
-            setTwin(prev => prev ? { ...prev, is_public: isPublic } : null);
+            // Update local share state
+            setShareInfo(prev => prev ? { ...prev, public_share_enabled: isPublic } : prev);
+
+            // If enabling and no token exists, regenerate
+            if (isPublic && !shareInfo?.share_token) {
+                await handleRegenerateLink();
+            }
         } catch (error: any) {
             console.error('Error toggling public status:', error);
             alert(error.message || 'Failed to update public status');
+        }
+    };
+
+    const handleRegenerateLink = async () => {
+        try {
+            const backendUrl = resolveApiBaseUrl();
+            const { data: { session } } = await supabase.auth.getSession();
+            const res = await fetch(`${backendUrl}/twins/${twinId}/share-link`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${session?.access_token}`
+                }
+            });
+            if (!res.ok) {
+                const errorData = await res.json();
+                throw new Error(errorData.detail?.message || 'Failed to regenerate share link');
+            }
+            const data = await res.json();
+            setShareInfo(data);
+        } catch (error: any) {
+            console.error('Error regenerating share link:', error);
+            alert(error.message || 'Failed to regenerate share link');
         }
     };
 
@@ -176,6 +227,10 @@ function TwinConsoleContent({ twinId }: { twinId: string }) {
         );
     }
 
+    const effectiveIsPublic = shareInfo?.public_share_enabled ?? twin?.is_public ?? false;
+    const effectiveShareLink = shareInfo?.share_url || undefined;
+    const effectiveShareToken = shareInfo?.share_token || null;
+
     const renderTab = () => {
         switch (activeTab) {
             case 'overview':
@@ -207,17 +262,18 @@ function TwinConsoleContent({ twinId }: { twinId: string }) {
                     <PublishTab
                         twinId={twinId}
                         twinName={twin.name}
-                        isPublic={twin.is_public}
-                        shareLink={twin.share_token ? `/share/${twinId}/${twin.share_token}` : undefined}
+                        isPublic={effectiveIsPublic}
+                        shareLink={effectiveShareLink}
                         onTogglePublic={handleTogglePublic}
+                        onRegenerateLink={handleRegenerateLink}
                     />
                 );
             case 'public-chat':
                 return (
                     <PublicChatTab
                         twinId={twinId}
-                        shareToken={twin.share_token}
-                        isPublic={twin.is_public}
+                        shareToken={effectiveShareToken}
+                        isPublic={effectiveIsPublic}
                     />
                 );
             case 'actions':

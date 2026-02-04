@@ -8,6 +8,8 @@ class ChatRequest(BaseModel):
     group_id: Optional[str] = None  # NEW: Allow group override
     metadata: Optional[Dict[str, Any]] = None
     mode: Optional[str] = None  # "owner" | "public"
+    # Compatibility: accept legacy {message} payloads for one release window
+    message: Optional[str] = None
 
 class ChatMetadata(BaseModel):
     type: str = "metadata"
@@ -304,10 +306,12 @@ class ChatWidgetRequest(BaseModel):
     query: str
     session_id: Optional[str] = None
     api_key: str
+    # Compatibility: accept legacy {message} payloads for one release window
+    message: Optional[str] = None
 
 class PublicChatRequest(BaseModel):
     message: str
-    conversation_history: Optional[List[Dict[str, str]]] = None
+    conversation_history: Optional[List[Dict[str, Any]]] = None
 
 # Owner Memory + Clarifications
 

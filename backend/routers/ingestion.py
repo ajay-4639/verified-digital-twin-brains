@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from modules.auth_guard import verify_owner, get_current_user, verify_twin_ownership, verify_source_ownership
 from modules.ingestion import ingest_youtube_transcript_wrapper, ingest_podcast_transcript, ingest_x_thread_wrapper, ingest_file, ingest_url
 from modules.observability import supabase
-from modules.training_jobs import get_training_job, process_training_queue
+from modules.training_jobs import get_training_job, process_training_queue, list_training_jobs
+from modules.job_queue import enqueue_job
 from pydantic import BaseModel
 from typing import Optional, List
 import os
@@ -21,6 +22,10 @@ class XThreadIngestRequest(BaseModel):
 
 class URLIngestRequest(BaseModel):
     url: str
+
+class URLIngestWithTwinRequest(BaseModel):
+    url: str
+    twin_id: str
 
 @router.post("/ingest/youtube/{twin_id}")
 async def ingest_youtube(twin_id: str, request: YouTubeIngestRequest, user=Depends(verify_owner)):
@@ -84,6 +89,45 @@ async def ingest_url_endpoint(twin_id: str, request: URLIngestRequest, user=Depe
     try:
         source_id = await ingest_url(twin_id, request.url, auto_index=True)
         # All URL types now auto-index directly, so status will be live
+        return {"source_id": source_id, "status": "live"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+# ---------------------------------------------------------------------------
+# Compatibility shims (Phase 2)
+# ---------------------------------------------------------------------------
+
+@router.post("/ingest/document")
+async def ingest_document_compat(
+    file: UploadFile = File(...),
+    twin_id: str = Form(...),
+    auto_index: bool = True,
+    user=Depends(verify_owner)
+):
+    """
+    Compatibility shim for onboarding:
+    Accepts form-data with file + twin_id and forwards to canonical /ingest/file/{twin_id}.
+    """
+    print("[DEPRECATED] /ingest/document called. Use /ingest/file/{twin_id}.")
+    verify_twin_ownership(twin_id, user)
+    try:
+        source_id = await ingest_file(twin_id, file, auto_index=auto_index)
+        status = "live" if auto_index else "staged"
+        return {"source_id": source_id, "status": status}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/ingest/url")
+async def ingest_url_compat(request: URLIngestWithTwinRequest, user=Depends(verify_owner)):
+    """
+    Compatibility shim for onboarding:
+    Accepts JSON { url, twin_id } and forwards to canonical /ingest/url/{twin_id}.
+    """
+    print("[DEPRECATED] /ingest/url called without twin_id in path. Use /ingest/url/{twin_id}.")
+    verify_twin_ownership(request.twin_id, user)
+    try:
+        source_id = await ingest_url(request.twin_id, request.url, auto_index=True)
         return {"source_id": source_id, "status": "live"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -183,6 +227,51 @@ async def get_training_job_endpoint(job_id: str, user=Depends(get_current_user))
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/training-jobs")
+async def list_training_jobs_endpoint(
+    twin_id: str,
+    status: Optional[str] = None,
+    limit: int = 100,
+    user=Depends(get_current_user)
+):
+    """List training jobs for a twin."""
+    verify_twin_ownership(twin_id, user)
+    try:
+        return list_training_jobs(twin_id=twin_id, status=status, limit=limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/training-jobs/{job_id}/retry")
+async def retry_training_job_endpoint(job_id: str, user=Depends(verify_owner)):
+    """Retry a failed training job by re-queueing it."""
+    job = get_training_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Verify user has access to this job's twin
+    if job.get("twin_id"):
+        verify_twin_ownership(job["twin_id"], user)
+
+    try:
+        # Reset status and error before re-queue
+        supabase.table("training_jobs").update({
+            "status": "queued",
+            "error_message": None
+        }).eq("id", job_id).execute()
+
+        enqueue_job(
+            job_id=job_id,
+            job_type=job.get("job_type", "ingestion"),
+            priority=job.get("priority", 0),
+            metadata=job.get("metadata", {})
+        )
+
+        return {"status": "queued", "job_id": job_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class ExtractNodesRequest(BaseModel):
     """Request to extract graph nodes from an ingested source."""
     max_chunks: Optional[int] = 10  # Limit chunks to control cost
@@ -247,11 +336,6 @@ async def extract_nodes_from_source(
             max_chunks=max_chunks,
             tenant_id=user.get("user_id")
         )
-        
-        # Update source to mark extraction complete
-        supabase.table("sources").update({
-            "health_status": "extracted"
-        }).eq("id", source_id).execute()
         
         return {
             "status": "success",

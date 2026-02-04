@@ -61,7 +61,10 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
     verify_twin_ownership(twin_id, user)
     ensure_twin_active(twin_id)
     
-    query = request.query
+    # Compatibility: accept legacy {message} payloads
+    query = request.query or request.message or ""
+    if not query:
+        raise HTTPException(status_code=422, detail="query is required")
     conversation_id = request.conversation_id
     group_id = request.group_id
     
@@ -279,7 +282,8 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                     done, _ = await asyncio.wait({pending_task}, timeout=10)
                     if not done:
                         # Keep the SSE stream alive while the agent is still thinking.
-                        yield json.dumps({"type": "ping"}) + "\n"
+                        # Keep SSE stream alive using canonical event type
+                        yield json.dumps({"type": "metadata", "ping": True}) + "\n"
                         continue
 
                     try:
@@ -346,11 +350,11 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
             # 4. Send final content
             if full_response:
                 print(f"[Chat] Yielding content: {len(full_response)} chars")
-                yield json.dumps({"type": "content", "content": full_response}) + "\n"
+                yield json.dumps({"type": "content", "token": full_response, "content": full_response}) + "\n"
             else:
                 fallback = "I don't have this specific information in my knowledge base."
                 print(f"[Chat] Fallback emitted: {fallback}")
-                yield json.dumps({"type": "content", "content": fallback}) + "\n"
+                yield json.dumps({"type": "content", "token": fallback, "content": fallback}) + "\n"
 
             # 5. Done event
             yield json.dumps({"type": "done"}) + "\n"
@@ -459,7 +463,10 @@ async def chat_widget(twin_id: str, request: ChatWidgetRequest, req_raw: Request
         raise HTTPException(status_code=429, detail="Session rate limit exceeded")
     
     # 5. Process Chat
-    query = request.query
+    # Compatibility: accept legacy {message} payloads
+    query = request.query or request.message or ""
+    if not query:
+        raise HTTPException(status_code=422, detail="query is required")
     group_id = key_info.get("group_id")
     
     # Get conversation for session
@@ -579,7 +586,7 @@ async def chat_widget(twin_id: str, request: ChatWidgetRequest, req_raw: Request
                 
                 if not sent_metadata:
                     output = {
-                        "type": "answer_metadata",
+                        "type": "metadata",
                         "confidence_score": confidence_score,
                         "citations": citations,
                         "conversation_id": conversation_id,
@@ -594,7 +601,7 @@ async def chat_widget(twin_id: str, request: ChatWidgetRequest, req_raw: Request
                 msg = event["agent"]["messages"][-1]
                 if isinstance(msg, AIMessage):
                     final_content += msg.content
-                    yield json.dumps({"type": "answer_token", "content": msg.content}) + "\n"
+                    yield json.dumps({"type": "content", "token": msg.content, "content": msg.content}) + "\n"
 
         # Record usage
         record_request(session_id, "session", "requests_per_hour")
@@ -654,14 +661,18 @@ async def public_chat_endpoint(twin_id: str, token: str, request: PublicChatRequ
         print(f"Warning: Could not emit event or check triggers: {e}")
     
     conversation_id = None
-    # Build conversation history
+    # Build conversation history (tolerate extra fields)
     history = []
     if request.conversation_history:
         for msg in request.conversation_history:
-            if msg.get("role") == "user":
-                history.append(HumanMessage(content=msg.get("content", "")))
-            elif msg.get("role") == "assistant":
-                history.append(AIMessage(content=msg.get("content", "")))
+            role = msg.get("role") if isinstance(msg, dict) else None
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, str):
+                continue
+            if role == "user":
+                history.append(HumanMessage(content=content))
+            elif role == "assistant":
+                history.append(AIMessage(content=content))
 
     # Identity gate for public chat
     gate = await run_identity_gate(
@@ -735,6 +746,10 @@ async def public_chat_endpoint(twin_id: str, token: str, request: PublicChatRequ
             if acknowledgments:
                 final_response += "\n\n" + " ".join(acknowledgments)
         
+        citations = _normalize_json(citations)
+        owner_memory_refs = _normalize_json(owner_memory_refs)
+        owner_memory_topics = _normalize_json(owner_memory_topics)
+
         return {
             "status": "answer",
             "response": final_response,

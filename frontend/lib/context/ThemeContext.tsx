@@ -90,11 +90,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
         setTheme(current === 'dark' ? 'light' : 'dark');
     }, [resolvedTheme, setTheme]);
 
-    // Prevent flash by only rendering after mount
-    if (!mounted) {
-        return <>{children}</>;
-    }
-
     return (
         <ThemeContext.Provider value={{ theme, resolvedTheme, setTheme, toggleTheme }}>
             {children}

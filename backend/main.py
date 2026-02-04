@@ -90,7 +90,12 @@ app.include_router(jobs.router)
 app.include_router(til.router)
 app.include_router(feedback.router)
 app.include_router(audio.router)
-app.include_router(enhanced_ingestion.router)
+ENHANCED_INGESTION_ENABLED = os.getenv("ENABLE_ENHANCED_INGESTION", "false").lower() == "true"
+if ENHANCED_INGESTION_ENABLED:
+    app.include_router(enhanced_ingestion.router)
+    print("[INFO] Enhanced ingestion routes enabled (ENABLE_ENHANCED_INGESTION=true)")
+else:
+    print("[INFO] Enhanced ingestion routes disabled (ENABLE_ENHANCED_INGESTION=false)")
 app.include_router(reasoning.router)
 app.include_router(interview.router)
 app.include_router(api_keys.router)
@@ -111,9 +116,9 @@ if VC_ROUTES_ENABLED:
     try:
         from api import vc_routes
         app.include_router(vc_routes.router, prefix="/api", tags=["vc"])
-        print("✅ VC routes enabled (ENABLE_VC_ROUTES=true)")
+        print("[INFO] VC routes enabled (ENABLE_VC_ROUTES=true)")
     except ImportError as e:
-        print(f"⚠️  VC routes not available (ImportError): {e}")
+        print(f"[WARN] VC routes not available (ImportError): {e}")
         print("   VC routes will be disabled. Set ENABLE_VC_ROUTES=false to suppress this warning.")
 
 # ============================================================================

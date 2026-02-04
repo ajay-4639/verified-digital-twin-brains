@@ -4,8 +4,8 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { getSupabaseClient } from '@/lib/supabase/client';
 import MessageList, { Message } from './MessageList';
 import { useTwin } from '@/lib/context/TwinContext';
+import { resolveApiBaseUrl } from '@/lib/api';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
 const STREAM_IDLE_TIMEOUT_MS = 60000;
 
 export default function ChatInterface({
@@ -40,6 +40,14 @@ export default function ChatInterface({
   const [clarification, setClarification] = useState<any | null>(null);
   const [clarifyAnswer, setClarifyAnswer] = useState('');
   const [clarifyOption, setClarifyOption] = useState<string | null>(null);
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [lastDebug, setLastDebug] = useState<{
+    decision?: 'CLARIFY' | 'ANSWER' | 'UNKNOWN';
+    used_owner_memory?: boolean;
+    owner_memory_refs?: string[];
+    owner_memory_topics?: string[];
+    clarification_id?: string | null;
+  }>({});
 
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -49,6 +57,7 @@ export default function ChatInterface({
     const resolvedTenantId = tenantId || user?.tenant_id || 'unknown';
     return `simulator_chat_${resolvedTenantId}_${twinId}`;
   }, [tenantId, user?.tenant_id, twinId]);
+  const apiBaseUrl = useMemo(() => resolveApiBaseUrl(), []);
 
   const getAuthToken = useCallback(async (): Promise<string | null> => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -111,7 +120,7 @@ export default function ChatInterface({
         const token = await getAuthToken();
         if (!token) return;
 
-        const response = await fetch(`${API_BASE_URL}/conversations/${conversationId}/messages`, {
+        const response = await fetch(`${apiBaseUrl}/conversations/${conversationId}/messages`, {
           headers: { 'Authorization': `Bearer ${token}` }
         });
         if (response.ok) {
@@ -182,7 +191,7 @@ export default function ChatInterface({
 
       abortRef.current = new AbortController();
 
-      const response = await fetch(`${API_BASE_URL}/chat/${twinId}`, {
+      const response = await fetch(`${apiBaseUrl}/chat/${twinId}`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -225,6 +234,14 @@ export default function ChatInterface({
                 setIsSearching(false);
                 setLoading(false);
                 setClarification(data);
+                const proposedTopic = data?.memory_write_proposal?.topic;
+                setLastDebug({
+                  decision: 'CLARIFY',
+                  used_owner_memory: false,
+                  owner_memory_refs: [],
+                  owner_memory_topics: proposedTopic ? [proposedTopic] : [],
+                  clarification_id: data.clarification_id || null
+                });
                 setMessages((prev) => {
                   const last = [...prev];
                   const lastMsg = { ...last[last.length - 1] };
@@ -237,6 +254,22 @@ export default function ChatInterface({
                 if (data.conversation_id && !conversationId && onConversationStarted) {
                   onConversationStarted(data.conversation_id);
                 }
+                const summaries = Array.isArray(data.owner_memory_summaries)
+                  ? data.owner_memory_summaries
+                  : [];
+                const ownerMemoryTopics = Array.isArray(data.owner_memory_topics)
+                  ? data.owner_memory_topics
+                  : summaries.map((summary: any) => summary?.topic).filter(Boolean);
+                const ownerMemoryRefs = Array.isArray(data.owner_memory_refs)
+                  ? data.owner_memory_refs
+                  : summaries.map((summary: any) => summary?.id).filter(Boolean);
+                setLastDebug({
+                  decision: 'ANSWER',
+                  used_owner_memory: ownerMemoryRefs.length > 0,
+                  owner_memory_refs: ownerMemoryRefs,
+                  owner_memory_topics: ownerMemoryTopics,
+                  clarification_id: null
+                });
                 // Extract graph_used from metadata
                 const graphUsed = data.graph_context?.graph_used || false;
                 setMessages((prev) => {
@@ -245,8 +278,9 @@ export default function ChatInterface({
                   lastMsg.confidence_score = data.confidence_score;
                   lastMsg.citations = data.citations;
                   lastMsg.graph_used = graphUsed;
-                  lastMsg.owner_memory_refs = data.owner_memory_refs || [];
-                  lastMsg.used_owner_memory = Boolean(data.owner_memory_refs?.length);
+                  lastMsg.owner_memory_refs = ownerMemoryRefs;
+                  lastMsg.owner_memory_topics = ownerMemoryTopics;
+                  lastMsg.used_owner_memory = ownerMemoryRefs.length > 0;
                   last[last.length - 1] = lastMsg;
                   return last;
                 });
@@ -379,7 +413,7 @@ export default function ChatInterface({
                 try {
                   const token = await getAuthToken();
                   if (!token) throw new Error('Not authenticated');
-                  const res = await fetch(`${API_BASE_URL}/twins/${twinId}/clarifications/${clarification.clarification_id}/resolve`, {
+                  const res = await fetch(`${apiBaseUrl}/twins/${twinId}/clarifications/${clarification.clarification_id}/resolve`, {
                     method: 'POST',
                     headers: {
                       'Authorization': `Bearer ${token}`,
@@ -418,6 +452,46 @@ export default function ChatInterface({
             >
               Retry
             </button>
+          </div>
+        )}
+        {mode !== 'public' && (
+          <div className="mb-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-700">
+            <div className="flex items-center justify-between">
+              <div className="font-bold uppercase tracking-wider text-[10px] text-slate-500">Debug</div>
+              <button
+                onClick={() => setDebugOpen((prev) => !prev)}
+                className="text-[10px] font-bold uppercase tracking-wider text-indigo-600"
+              >
+                {debugOpen ? 'Hide' : 'Show'}
+              </button>
+            </div>
+            {debugOpen && (
+              <div className="mt-3 space-y-2">
+                <div className="flex flex-wrap gap-3 text-[10px] text-slate-600">
+                  <span>IdentityGate: <strong>{lastDebug.decision || 'UNKNOWN'}</strong></span>
+                  <span>Used Owner Memory: <strong>{lastDebug.used_owner_memory ? 'Yes' : 'No'}</strong></span>
+                  {lastDebug.clarification_id && (
+                    <span>Clarification ID: <strong>{lastDebug.clarification_id}</strong></span>
+                  )}
+                </div>
+                <div className="text-[10px] text-slate-600">
+                  Owner Memory Topics:{' '}
+                  <strong>
+                    {lastDebug.owner_memory_topics && lastDebug.owner_memory_topics.length > 0
+                      ? lastDebug.owner_memory_topics.join(', ')
+                      : 'None'}
+                  </strong>
+                </div>
+                <div className="text-[10px] text-slate-600">
+                  Owner Memory Refs:{' '}
+                  <strong>
+                    {lastDebug.owner_memory_refs && lastDebug.owner_memory_refs.length > 0
+                      ? lastDebug.owner_memory_refs.join(', ')
+                      : 'None'}
+                  </strong>
+                </div>
+              </div>
+            )}
           </div>
         )}
         <div className="relative flex items-center max-w-4xl mx-auto w-full">

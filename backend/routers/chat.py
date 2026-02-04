@@ -219,6 +219,16 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
 
             owner_memory_context = gate.get("owner_memory_context", "")
             owner_memory_refs = gate.get("owner_memory_refs", [])
+            owner_memory_candidates = gate.get("owner_memory") or []
+            owner_memory_summaries = []
+            for mem in owner_memory_candidates:
+                topic = mem.get("topic_normalized") or mem.get("topic")
+                if mem.get("id") or topic:
+                    owner_memory_summaries.append({
+                        "id": mem.get("id"),
+                        "topic": topic
+                    })
+            owner_memory_topics = [s.get("topic") for s in owner_memory_summaries if s.get("topic")]
 
             # DETECT REASONING INTENT (Simple Heuristic for now)
             # In production, use a classifier model
@@ -322,6 +332,8 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                 "confidence_score": confidence_score,
                 "conversation_id": conversation_id,
                 "owner_memory_refs": owner_memory_refs,
+                "owner_memory_topics": owner_memory_topics,
+                "owner_memory_summaries": owner_memory_summaries,
                 "graph_context": {
                     "has_graph": graph_stats["has_graph"],
                     "node_count": graph_stats["node_count"],
@@ -515,6 +527,36 @@ async def chat_widget(twin_id: str, request: ChatWidgetRequest, req_raw: Request
 
     owner_memory_context = gate.get("owner_memory_context", "")
     owner_memory_refs = gate.get("owner_memory_refs", [])
+    owner_memory_candidates = gate.get("owner_memory") or []
+    owner_memory_topics = [
+        (m.get("topic_normalized") or m.get("topic"))
+        for m in owner_memory_candidates
+        if (m.get("topic_normalized") or m.get("topic"))
+    ]
+    owner_memory_candidates = gate.get("owner_memory") or []
+    owner_memory_topics = [
+        (m.get("topic_normalized") or m.get("topic"))
+        for m in owner_memory_candidates
+        if (m.get("topic_normalized") or m.get("topic"))
+    ]
+    owner_memory_candidates = gate.get("owner_memory") or []
+    owner_memory_topics = [
+        (m.get("topic_normalized") or m.get("topic"))
+        for m in owner_memory_candidates
+        if (m.get("topic_normalized") or m.get("topic"))
+    ]
+    owner_memory_candidates = gate.get("owner_memory") or []
+    owner_memory_topics = [
+        (m.get("topic_normalized") or m.get("topic"))
+        for m in owner_memory_candidates
+        if (m.get("topic_normalized") or m.get("topic"))
+    ]
+    owner_memory_candidates = gate.get("owner_memory") or []
+    owner_memory_topics = [
+        (m.get("topic_normalized") or m.get("topic"))
+        for m in owner_memory_candidates
+        if (m.get("topic_normalized") or m.get("topic"))
+    ]
     
     async def widget_stream_generator():
         final_content = ""
@@ -542,6 +584,7 @@ async def chat_widget(twin_id: str, request: ChatWidgetRequest, req_raw: Request
                         "citations": citations,
                         "conversation_id": conversation_id,
                         "owner_memory_refs": owner_memory_refs,
+                        "owner_memory_topics": owner_memory_topics,
                         "session_id": session_id
                     }
                     yield json.dumps(output) + "\n"
@@ -653,6 +696,12 @@ async def public_chat_endpoint(twin_id: str, token: str, request: PublicChatRequ
 
     owner_memory_context = gate.get("owner_memory_context", "")
     owner_memory_refs = gate.get("owner_memory_refs", [])
+    owner_memory_candidates = gate.get("owner_memory") or []
+    owner_memory_topics = [
+        (m.get("topic_normalized") or m.get("topic"))
+        for m in owner_memory_candidates
+        if (m.get("topic_normalized") or m.get("topic"))
+    ]
 
     try:
         final_response = ""
@@ -691,6 +740,7 @@ async def public_chat_endpoint(twin_id: str, token: str, request: PublicChatRequ
             "response": final_response,
             "citations": citations,
             "owner_memory_refs": owner_memory_refs,
+            "owner_memory_topics": owner_memory_topics,
             "used_owner_memory": bool(owner_memory_refs)
         }
     except Exception as e:

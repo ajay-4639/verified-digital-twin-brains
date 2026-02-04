@@ -1,7 +1,7 @@
 'use client';
 
-import { useSearchParams, useRouter } from 'next/navigation';
-import { useState, useEffect, Suspense } from 'react';
+import { useSearchParams, useRouter, useParams } from 'next/navigation';
+import { useState, useEffect, useCallback, useRef, Suspense } from 'react';
 import { getSupabaseClient } from '@/lib/supabase/client';
 import { ConsoleLayout } from '@/components/console/ConsoleLayout';
 import { OverviewTab } from '@/components/console/tabs/OverviewTab';
@@ -13,6 +13,7 @@ import { PublishTab } from '@/components/console/tabs/PublishTab';
 import { PublicChatTab } from '@/components/console/tabs/PublicChatTab';
 import { ActionsTab } from '@/components/console/tabs/ActionsTab';
 import { SettingsTab } from '@/components/console/tabs/SettingsTab';
+import { resolveApiBaseUrl } from '@/lib/api';
 
 interface Twin {
     id: string;
@@ -38,48 +39,73 @@ function TwinConsoleContent({ twinId }: { twinId: string }) {
 
     const activeTab = searchParams.get('tab') || 'overview';
 
-    useEffect(() => {
-        const fetchTwin = async () => {
-            try {
-                const { data, error } = await supabase
-                    .from('twins')
-                    .select('*')
-                    .eq('id', twinId)
-                    .single();
-
-                if (error) throw error;
-                setTwin(data);
-
-                // Fetch stats
-                const { count: sourceCount } = await supabase
-                    .from('sources')
-                    .select('*', { count: 'exact', head: true })
-                    .eq('twin_id', twinId);
-
-                const { count: escalationCount } = await supabase
-                    .from('escalations')
-                    .select('*', { count: 'exact', head: true })
-                    .eq('twin_id', twinId)
-                    .eq('status', 'pending');
-
-                setStats({
-                    sources: sourceCount || 0,
-                    conversations: 0, // Would need sessions table
-                    escalations: escalationCount || 0
-                });
-            } catch (error) {
-                console.error('Error fetching twin:', error);
-            } finally {
-                setLoading(false);
+    const retryRef = useRef(0);
+    const fetchTwin = useCallback(async () => {
+        try {
+            const { data: { session } } = await supabase.auth.getSession();
+            const token = session?.access_token;
+            if (!token) {
+                if (retryRef.current < 5) {
+                    retryRef.current += 1;
+                    setTimeout(fetchTwin, 600);
+                } else {
+                    throw new Error('Not authenticated');
+                }
+                return;
             }
-        };
+            const backendUrl = resolveApiBaseUrl();
+            const response = await fetch(`${backendUrl}/twins/${twinId}`, {
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+            if (!response.ok) {
+                const errText = await response.text();
+                throw new Error(errText || 'Failed to fetch twin');
+            }
+            const data = await response.json();
+            setTwin(data);
 
+            // Fetch stats
+            const { count: sourceCount } = await supabase
+                .from('sources')
+                .select('*', { count: 'exact', head: true })
+                .eq('twin_id', twinId);
+
+            const { count: escalationCount } = await supabase
+                .from('escalations')
+                .select('*', { count: 'exact', head: true })
+                .eq('twin_id', twinId)
+                .eq('status', 'pending');
+
+            setStats({
+                sources: sourceCount || 0,
+                conversations: 0, // Would need sessions table
+                escalations: escalationCount || 0
+            });
+        } catch (error) {
+            console.error('Error fetching twin:', error);
+        } finally {
+            setLoading(false);
+        }
+    }, [supabase, twinId]);
+
+    useEffect(() => {
         fetchTwin();
-    }, [twinId, supabase]);
+        const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+            if (session?.access_token) {
+                retryRef.current = 0;
+                fetchTwin();
+            }
+        });
+        return () => {
+            data?.subscription?.unsubscribe();
+        };
+    }, [fetchTwin, supabase]);
 
     const handleTogglePublic = async (isPublic: boolean) => {
         try {
-            const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+            const backendUrl = resolveApiBaseUrl();
             // Use authenticated fetch (assuming Supabase session is handled by the fetch wrapper or direct useAuthFetch)
             const { data: { session } } = await supabase.auth.getSession();
 
@@ -223,14 +249,17 @@ function TwinConsoleContent({ twinId }: { twinId: string }) {
     );
 }
 
-export default function TwinConsolePage({ params }: { params: { id: string } }) {
+export default function TwinConsolePage() {
+    const params = useParams();
+    const twinId = (params?.id as string) || '';
+
     return (
         <Suspense fallback={
             <div className="flex items-center justify-center h-screen bg-[#0a0a0f]">
                 <div className="w-12 h-12 border-4 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin" />
             </div>
         }>
-            <TwinConsoleContent twinId={params.id} />
+            <TwinConsoleContent twinId={twinId} />
         </Suspense>
     );
 }

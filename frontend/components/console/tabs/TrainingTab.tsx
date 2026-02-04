@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import ChatInterface from '@/components/Chat/ChatInterface';
 import { getSupabaseClient } from '@/lib/supabase/client';
+import { resolveApiBaseUrl } from '@/lib/api';
 
 interface ClarificationThread {
     id: string;
@@ -46,7 +47,7 @@ export function TrainingTab({ twinId }: { twinId: string }) {
                 return;
             }
 
-            const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+            const backendUrl = resolveApiBaseUrl();
             const [pendingRes, memoryRes] = await Promise.all([
                 fetch(`${backendUrl}/twins/${twinId}/clarifications?status=pending_owner`, {
                     headers: { 'Authorization': `Bearer ${token}` }
@@ -95,7 +96,7 @@ export function TrainingTab({ twinId }: { twinId: string }) {
                 setError('Not authenticated.');
                 return;
             }
-            const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+            const backendUrl = resolveApiBaseUrl();
             const res = await fetch(`${backendUrl}/twins/${twinId}/clarifications/${thread.id}/resolve`, {
                 method: 'POST',
                 headers: {

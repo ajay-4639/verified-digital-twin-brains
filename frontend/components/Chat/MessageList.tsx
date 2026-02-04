@@ -8,6 +8,7 @@ export interface Message {
   graph_used?: boolean;
   owner_memory_refs?: string[];
   used_owner_memory?: boolean;
+  owner_memory_topics?: string[];
 }
 
 interface MessageListProps {
@@ -53,6 +54,11 @@ const MessageList = React.memo(({ messages, loading, isSearching }: MessageListP
                     <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black border uppercase tracking-wider bg-emerald-50 text-emerald-700 border-emerald-100">
                       <span>🧠</span>
                       Used Owner Memory
+                    </div>
+                  )}
+                  {msg.used_owner_memory && msg.owner_memory_topics && msg.owner_memory_topics.length > 0 && (
+                    <div className="px-3 py-1.5 rounded-full text-[10px] font-black border uppercase tracking-wider bg-emerald-50 text-emerald-700 border-emerald-100">
+                      Topics: {msg.owner_memory_topics.join(', ')}
                     </div>
                   )}
                   {msg.graph_used && (

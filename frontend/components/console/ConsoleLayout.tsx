@@ -1,6 +1,7 @@
 'use client';
 
 import React from 'react';
+import { resolveApiHostLabel } from '@/lib/api';
 import { TabNavigation, Tab } from './TabNavigation';
 
 interface ConsoleLayoutProps {
@@ -109,6 +110,8 @@ export function ConsoleLayout({
     children,
     stats
 }: ConsoleLayoutProps) {
+    const apiHostLabel = resolveApiHostLabel();
+
     // Add badges to tabs based on stats
     const tabsWithBadges = CONSOLE_TABS.map(tab => ({
         ...tab,
@@ -137,6 +140,9 @@ export function ConsoleLayout({
                                 </span>
                                 <span className="text-xs text-slate-500">
                                     {stats?.sources || 0} sources • {stats?.conversations || 0} conversations
+                                </span>
+                                <span className="text-[10px] text-slate-500">
+                                    API: {apiHostLabel} • Twin: {twinId}
                                 </span>
                             </div>
                         </div>

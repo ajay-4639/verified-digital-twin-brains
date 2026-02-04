@@ -1,15 +1,15 @@
 'use client';
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useParams } from 'next/navigation';
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+import { resolveApiBaseUrl } from '@/lib/api';
 
 interface Message {
     role: 'user' | 'assistant';
     content: string;
     citations?: string[];
     used_owner_memory?: boolean;
+    owner_memory_topics?: string[];
 }
 
 export default function PublicSharePage() {
@@ -24,6 +24,7 @@ export default function PublicSharePage() {
     const [twinName, setTwinName] = useState('AI Assistant');
     const [error, setError] = useState<string | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const apiBaseUrl = useMemo(() => resolveApiBaseUrl(), []);
 
     useEffect(() => {
         validateShareToken();
@@ -35,7 +36,7 @@ export default function PublicSharePage() {
 
     const validateShareToken = async () => {
         try {
-            const response = await fetch(`${API_BASE_URL}/public/validate-share/${twinId}/${shareToken}`);
+            const response = await fetch(`${apiBaseUrl}/public/validate-share/${twinId}/${shareToken}`);
             if (response.ok) {
                 const data = await response.json();
                 setIsValid(true);
@@ -59,12 +60,15 @@ export default function PublicSharePage() {
         setIsLoading(true);
 
         try {
-            const response = await fetch(`${API_BASE_URL}/public/chat/${twinId}/${shareToken}`, {
+            const response = await fetch(`${apiBaseUrl}/public/chat/${twinId}/${shareToken}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     message: userMessage,
-                    conversation_history: messages
+                    conversation_history: messages.map(msg => ({
+                        role: msg.role,
+                        content: msg.content
+                    }))
                 })
             });
 
@@ -77,7 +81,8 @@ export default function PublicSharePage() {
                         role: 'assistant',
                         content: data.response || 'No response',
                         citations: data.citations || [],
-                        used_owner_memory: Boolean(data.used_owner_memory)
+                        used_owner_memory: Boolean(data.used_owner_memory),
+                        owner_memory_topics: Array.isArray(data.owner_memory_topics) ? data.owner_memory_topics : []
                     }]);
                 }
             } else {
@@ -168,6 +173,11 @@ export default function PublicSharePage() {
                                         {message.used_owner_memory && (
                                             <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
                                                 Used Owner Memory
+                                            </span>
+                                        )}
+                                        {message.used_owner_memory && message.owner_memory_topics && message.owner_memory_topics.length > 0 && (
+                                            <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-200 border border-emerald-500/30">
+                                                Topics: {message.owner_memory_topics.join(', ')}
                                             </span>
                                         )}
                                         {message.citations?.map((_, i) => (

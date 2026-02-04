@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
+import { resolveApiBaseUrl } from '@/lib/api';
 
 interface Message {
     role: 'user' | 'assistant';
@@ -79,7 +80,7 @@ export function ChatTab({ twinId, twinName, onSendMessage }: ChatTabProps) {
         // Trigger Debug Retrieval if enabled
         if (showDebug) {
             setDebugLoading(true);
-            const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+            const backendUrl = resolveApiBaseUrl();
             fetch(`${backendUrl}/debug/retrieval`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -112,7 +113,7 @@ export function ChatTab({ twinId, twinName, onSendMessage }: ChatTabProps) {
                 });
             } else {
                 // Default: call backend chat API (streaming)
-                const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+                const backendUrl = resolveApiBaseUrl();
                 const res = await fetch(`${backendUrl}/chat/${twinId}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -189,7 +190,7 @@ export function ChatTab({ twinId, twinName, onSendMessage }: ChatTabProps) {
         setIsVerifying(true);
         setVerificationResult(null);
         try {
-            const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+            const backendUrl = resolveApiBaseUrl();
             const res = await fetch(`${backendUrl}/verify/twins/${twinId}/run`, {
                 method: 'POST',
             });

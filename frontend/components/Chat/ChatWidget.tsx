@@ -2,6 +2,7 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { getSupabaseClient } from '@/lib/supabase/client';
+import { resolveApiBaseUrl } from '@/lib/api';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -28,7 +29,7 @@ export default function ChatWidget({
   apiBaseUrl,
   theme
 }: ChatWidgetProps) {
-  const baseUrl = apiBaseUrl || process.env.NEXT_PUBLIC_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+  const baseUrl = apiBaseUrl || resolveApiBaseUrl();
   const primaryColor = theme?.primaryColor || '#2563eb';
   const headerColor = theme?.headerColor || primaryColor;
   const headerTextColor = theme?.headerTextColor || '#ffffff';

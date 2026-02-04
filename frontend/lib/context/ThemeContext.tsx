@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useLayoutEffect } from 'react';
 
 type Theme = 'light' | 'dark' | 'system';
 
@@ -29,65 +29,78 @@ function getSystemTheme(): 'light' | 'dark' {
 }
 
 function getStoredTheme(): Theme {
-    if (typeof window === 'undefined') return 'system';
+    if (typeof window === 'undefined') return 'light';
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored === 'light' || stored === 'dark' || stored === 'system') {
         return stored;
     }
-    return 'system';
+    return 'light'; // Default to light for predictable behavior
+}
+
+// Apply theme to document - runs synchronously
+function applyThemeToDocument(resolvedTheme: 'light' | 'dark') {
+    const root = document.documentElement;
+    root.classList.remove('light', 'dark');
+    root.classList.add(resolvedTheme);
+    
+    // Also apply to body for broader compatibility
+    document.body.classList.remove('light', 'dark');
+    document.body.classList.add(resolvedTheme);
+    
+    // Update meta theme-color for mobile browsers
+    const metaTheme = document.querySelector('meta[name="theme-color"]');
+    if (metaTheme) {
+        metaTheme.setAttribute('content', resolvedTheme === 'dark' ? '#0f172a' : '#ffffff');
+    }
 }
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-    const [theme, setThemeState] = useState<Theme>('system');
-    const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>('light');
-    const [mounted, setMounted] = useState(false);
+    const [theme, setThemeState] = useState<Theme>(() => {
+        // Initialize from localStorage synchronously during SSR/hydration
+        if (typeof window === 'undefined') return 'light';
+        return getStoredTheme();
+    });
+    
+    const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>(() => {
+        if (typeof window === 'undefined') return 'light';
+        const stored = getStoredTheme();
+        return stored === 'system' ? getSystemTheme() : stored;
+    });
 
-    // Initialize from localStorage after mount
-    useEffect(() => {
-        setThemeState(getStoredTheme());
-        setMounted(true);
-    }, []);
-
-    // Resolve and apply theme
-    useEffect(() => {
-        if (!mounted) return;
-
+    // Use useLayoutEffect to apply theme synchronously before paint
+    useLayoutEffect(() => {
         const resolved = theme === 'system' ? getSystemTheme() : theme;
         setResolvedTheme(resolved);
-
-        // Apply to document
-        const root = document.documentElement;
-        root.classList.remove('light', 'dark');
-        root.classList.add(resolved);
-
-        // Update meta theme-color for mobile browsers
-        const metaTheme = document.querySelector('meta[name="theme-color"]');
-        if (metaTheme) {
-            metaTheme.setAttribute('content', resolved === 'dark' ? '#0f172a' : '#ffffff');
-        }
-    }, [theme, mounted]);
+        applyThemeToDocument(resolved);
+    }, [theme]);
 
     // Listen for system theme changes
     useEffect(() => {
-        if (!mounted || theme !== 'system') return;
+        if (theme !== 'system') return;
 
         const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
         const handleChange = () => {
-            setResolvedTheme(getSystemTheme());
+            const newResolved = getSystemTheme();
+            setResolvedTheme(newResolved);
+            applyThemeToDocument(newResolved);
         };
 
         mediaQuery.addEventListener('change', handleChange);
         return () => mediaQuery.removeEventListener('change', handleChange);
-    }, [theme, mounted]);
+    }, [theme]);
 
     const setTheme = useCallback((newTheme: Theme) => {
         setThemeState(newTheme);
         localStorage.setItem(STORAGE_KEY, newTheme);
+        // Apply immediately
+        const resolved = newTheme === 'system' ? getSystemTheme() : newTheme;
+        setResolvedTheme(resolved);
+        applyThemeToDocument(resolved);
     }, []);
 
     const toggleTheme = useCallback(() => {
-        const current = resolvedTheme;
-        setTheme(current === 'dark' ? 'light' : 'dark');
+        const newTheme = resolvedTheme === 'dark' ? 'light' : 'dark';
+        setTheme(newTheme);
     }, [resolvedTheme, setTheme]);
 
     return (

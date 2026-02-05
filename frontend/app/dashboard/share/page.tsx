@@ -6,7 +6,7 @@ import { createClient } from '@/lib/supabase/client';
 import { resolveApiBaseUrl } from '@/lib/api';
 
 export default function SharePage() {
-  const { activeTwin, activeTwinData, refreshTwinData } = useTwin();
+  const { activeTwin, refreshTwins } = useTwin();
   const [isUpdating, setIsUpdating] = useState(false);
   const [copied, setCopied] = useState(false);
   const [qrVisible, setQrVisible] = useState(false);
@@ -14,7 +14,7 @@ export default function SharePage() {
   const apiBaseUrl = useMemo(() => resolveApiBaseUrl(), []);
   const supabase = createClient();
 
-  const settings = activeTwinData?.settings || {};
+  const settings = (activeTwin?.settings || {}) as any;
   const widgetSettings = settings.widget_settings || {};
   const isPublic = widgetSettings.public_share_enabled || false;
   const handle = settings.handle || '';
@@ -24,7 +24,7 @@ export default function SharePage() {
     if (typeof window === 'undefined') return '';
     const origin = window.location.origin;
     if (handle) return `${origin}/share/${handle}`;
-    if (activeTwin && shareToken) return `${origin}/share/${activeTwin}/${shareToken}`;
+    if (activeTwin?.id && shareToken) return `${origin}/share/${activeTwin.id}/${shareToken}`;
     return '';
   }, [handle, activeTwin, shareToken]);
 
@@ -42,7 +42,7 @@ export default function SharePage() {
       // We use the patch endpoint to update settings
       const newStatus = !isPublic;
 
-      const response = await fetch(`${apiBaseUrl}/twins/${activeTwin}`, {
+      const response = await fetch(`${apiBaseUrl}/twins/${activeTwin.id}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -56,7 +56,7 @@ export default function SharePage() {
         throw new Error('Failed to update share status');
       }
 
-      await refreshTwinData();
+      await refreshTwins();
     } catch (error) {
       console.error('Error toggling share:', error);
       alert('Failed to update sharing status. Please try again.');
@@ -86,7 +86,7 @@ export default function SharePage() {
       {/* Header */}
       <div>
         <h1 className="text-3xl font-black tracking-tight text-slate-900">Share Your Twin</h1>
-        <p className="text-slate-500 mt-1">Manage public access and sharing for {activeTwinData?.name}</p>
+        <p className="text-slate-500 mt-1">Manage public access and sharing for {activeTwin.name}</p>
       </div>
 
       {/* Primary Share Link */}
@@ -165,7 +165,7 @@ export default function SharePage() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
               </svg>
             </div>
-            <p className="text-slate-500 font-medium">Scan to chat with {activeTwinData?.name}</p>
+            <p className="text-slate-500 font-medium">Scan to chat with {activeTwin.name}</p>
           </div>
         )}
       </div>

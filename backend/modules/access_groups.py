@@ -48,6 +48,7 @@ async def create_group(
     name: str,
     description: Optional[str] = None,
     is_public: bool = False,
+    is_default: bool = False,
     settings: Optional[Dict[str, Any]] = None
 ) -> str:
     """
@@ -59,6 +60,7 @@ async def create_group(
         "name": name,
         "description": description,
         "is_public": is_public,
+        "is_default": is_default,
         "settings": settings or {}
     }
     

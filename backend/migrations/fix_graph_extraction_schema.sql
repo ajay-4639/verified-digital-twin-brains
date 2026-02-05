@@ -12,13 +12,12 @@ ALTER TABLE memory_events DROP CONSTRAINT IF EXISTS memory_events_event_type_che
 
 ALTER TABLE memory_events ADD CONSTRAINT memory_events_event_type_check 
 CHECK (event_type IN (
-    'interaction', 
-    'correction', 
-    'manual_entry', 
-    'system_update', 
-    'content_extract',  -- Added this
-    'slot_extract',     -- Added this (used in slot extraction)
-    'auto_extract'      -- Added this (used in auto extraction)
+    'interaction', 'correction', 'manual_entry', 'system_update', 
+    'content_extract', 'slot_extract', 'auto_extract', 
+    'confirm', 'manual_edit', 'delete', 'ACTION_AUTOMATION', 
+    'CONFIGURATION_CHANGE', 'KNOWLEDGE_UPDATE', 'owner_memory_pending', 
+    'owner_memory_write', 'owner_memory_retract', 'DATA_EXPORT', 
+    'SAFETY_VIOLATION', 'SECURITY', 'TEST'
 ));
 
 -- 3. Verify RPC function (optional, just ensuring it exists)

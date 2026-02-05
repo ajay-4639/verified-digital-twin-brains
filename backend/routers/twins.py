@@ -119,8 +119,23 @@ async def create_twin(request: TwinCreateRequest, user=Depends(get_current_user)
         response = supabase.table("twins").insert(data).execute()
         
         if response.data:
-            print(f"[TWINS] Twin created: {response.data[0].get('id')}")
-            return response.data[0]
+            twin = response.data[0]
+            twin_id = twin.get('id')
+            print(f"[TWINS] Twin created: {twin_id}")
+            
+            # AUTO-CREATE DEFAULT GROUP
+            try:
+                await create_group(
+                    twin_id=twin_id,
+                    name="Default Group",
+                    description="Standard access group for all content",
+                    is_default=True
+                )
+                print(f"[TWINS] Default group created for twin: {twin_id}")
+            except Exception as ge:
+                print(f"[TWINS] WARNING: Failed to create default group for twin {twin_id}: {ge}")
+                
+            return twin
         else:
             raise HTTPException(status_code=400, detail="Failed to create twin")
     except HTTPException:

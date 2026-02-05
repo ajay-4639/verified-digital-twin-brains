@@ -1,105 +1,104 @@
-"""
-Training Worker
-Processes training jobs from the queue.
-Can be run as a separate process or triggered via API.
-"""
-import os
 import asyncio
-import time
+import os
+import signal
+import sys
 from dotenv import load_dotenv
-from modules.job_queue import dequeue_job, get_queue_length
-from modules.training_jobs import process_training_job
 
+# Load environment variables
 load_dotenv()
 
-WORKER_ENABLED = os.getenv("WORKER_ENABLED", "true").lower() == "true"
-WORKER_POLL_INTERVAL = int(os.getenv("WORKER_POLL_INTERVAL", "5"))
+from modules.job_queue import dequeue_job, get_redis_client, get_queue_length
+from modules._core.scribe_engine import process_graph_extraction_job, process_content_extraction_job
+from modules.training_jobs import process_training_job
 
+# Graceful shutdown
+shutdown_event = asyncio.Event()
 
-async def process_queue():
-    """Main worker loop that processes jobs from the queue."""
-    if not WORKER_ENABLED:
-        print("Worker is disabled (WORKER_ENABLED=false)")
-        return
+def handle_shutdown(sig, frame):
+    print("\n[Worker] Shutdown signal received. Finishing current job and stopping...")
+    shutdown_event.set()
+
+signal.signal(signal.SIGINT, handle_shutdown)
+signal.signal(signal.SIGTERM, handle_shutdown)
+
+async def worker_loop():
+    """
+    Main worker loop that polls for jobs and executes them.
+    """
+    worker_id = os.getenv("RENDER_INSTANCE_ID", "local-worker")
+    print(f"[Worker] Starting background worker ({worker_id})...")
     
-    print(f"Training worker started (poll interval: {WORKER_POLL_INTERVAL}s)")
-    
-    while True:
+    # Check Redis connection
+    redis_client = get_redis_client()
+    if redis_client:
+        print("[Worker] Connected to Redis queue")
+    else:
+        print("[Worker] WARNING: No Redis connection - using in-memory queue (ONLY WORKS LOCALLY OR SINGLE INSTANCE)")
+        print("[Worker] For Render, ensure REDIS_URL is set in environment variables")
+
+    consecutive_empty_polls = 0
+    jobs_processed = 0
+
+    while not shutdown_event.is_set():
         try:
-            # Get next job from queue
+            # Poll for job
             job = dequeue_job()
             
             if job:
-                job_id = job["job_id"]
-                job_type = job["job_type"]
-                print(f"Processing job {job_id} (type: {job_type}, priority: {job['priority']})")
+                consecutive_empty_polls = 0
+                jobs_processed += 1
                 
-                # Route to appropriate processor based on job type
-                if job_type == "graph_extraction":
-                    from modules._core.scribe_engine import process_graph_extraction_job
-                    success = await process_graph_extraction_job(job_id)
-                elif job_type == "content_extraction":
-                    from modules._core.scribe_engine import process_content_extraction_job
-                    success = await process_content_extraction_job(job_id)
-                else:
-                    # Default to training job processor (ingestion, reindex, health_check)
-                    success = await process_training_job(job_id)
+                job_id = job.get("job_id")
+                job_type = job.get("job_type")
+                metadata = job.get("metadata", {})
                 
-                if success:
-                    print(f"Job {job_id} completed successfully")
-                else:
-                    print(f"Job {job_id} failed")
+                print(f"[Worker] Processing job {job_id} ({job_type})")
+                
+                start_time = asyncio.get_event_loop().time()
+                success = False
+                
+                try:
+                    # Dispatch based on job type
+                    if job_type == "content_extraction":
+                        success = await process_content_extraction_job(job_id)
+                    elif job_type == "graph_extraction":
+                        success = await process_graph_extraction_job(job_id)
+                    elif job_type in ["ingestion", "reindex", "health_check"]:
+                        # Training jobs (legacy/ingestion module)
+                        success = await process_training_job(job_id)
+                    else:
+                        print(f"[Worker] Unknown job type: {job_type}")
+                        success = False
+                        
+                except Exception as e:
+                    print(f"[Worker] Job {job_id} crashed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    success = False
+                
+                duration = asyncio.get_event_loop().time() - start_time
+                status_symbol = "✅" if success else "❌"
+                print(f"[Worker] {status_symbol} Job {job_id} finished in {duration:.2f}s")
+                
             else:
-                # No jobs in queue, wait before checking again
-                queue_length = get_queue_length()
-                if queue_length > 0:
-                    print(f"Queue has {queue_length} jobs, but dequeue returned None (possible race condition)")
-                await asyncio.sleep(WORKER_POLL_INTERVAL)
+                consecutive_empty_polls += 1
+                # Adaptive sleep: sleep longer if queue is empty for a while, up to 5s
+                sleep_time = min(5, 0.5 + (consecutive_empty_polls * 0.1))
+                await asyncio.sleep(sleep_time)
                 
-        except KeyboardInterrupt:
-            print("\nWorker stopped by user")
-            break
+                # Log heartbeat every ~60s of inactivity
+                if consecutive_empty_polls % 60 == 0 and consecutive_empty_polls > 0:
+                     print(f"[Worker] Heartbeat: Waiting for jobs... (Queue empty)")
+
         except Exception as e:
-            print(f"Error in worker loop: {e}")
-            await asyncio.sleep(WORKER_POLL_INTERVAL)
+            print(f"[Worker] Critical error in loop: {e}")
+            import traceback
+            traceback.print_exc()
+            await asyncio.sleep(5)  # Backoff on critical error
 
-
-async def process_single_job(job_id: str):
-    """
-    Process a single job by ID (for on-demand processing via API).
-    Routes to appropriate processor based on job type.
-    
-    Args:
-        job_id: Job UUID to process
-    """
-    from modules.observability import supabase
-    try:
-        # Get job details to determine type
-        job_result = supabase.table("jobs").select("job_type").eq("id", job_id).single().execute()
-        if not job_result.data:
-            print(f"Job {job_id} not found")
-            return False
-        
-        job_type = job_result.data.get("job_type")
-        
-        # Route to appropriate processor
-        if job_type == "graph_extraction":
-            from modules._core.scribe_engine import process_graph_extraction_job
-            success = await process_graph_extraction_job(job_id)
-        elif job_type == "content_extraction":
-            from modules._core.scribe_engine import process_content_extraction_job
-            success = await process_content_extraction_job(job_id)
-        else:
-            # Default to training job processor
-            success = await process_training_job(job_id)
-        
-        return success
-    except Exception as e:
-        print(f"Error processing job {job_id}: {e}")
-        return False
-
+    print(f"[Worker] Shutdown complete. Processed {jobs_processed} jobs.")
 
 if __name__ == "__main__":
-    # Run worker loop
-    asyncio.run(process_queue())
-
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.run(worker_loop())

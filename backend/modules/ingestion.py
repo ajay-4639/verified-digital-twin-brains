@@ -1092,7 +1092,7 @@ async def ingest_source(source_id: str, twin_id: str, file_path: str, filename: 
         "content_text": text,
         "content_hash": content_hash,
         "status": "processing",
-        "staging_status": "processing",
+        "staging_status": "training",  # Valid values: staged, approved, rejected, training, live
         "extracted_text_length": len(text)
     }
 

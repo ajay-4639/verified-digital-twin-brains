@@ -671,9 +671,28 @@ async def public_chat_endpoint(twin_id: str, token: str, request: PublicChatRequ
     if not allowed:
         raise HTTPException(status_code=429, detail="Rate limit exceeded. Please try again later.")
     
-    # Get public group for context
+    # Get public group for context (with fallback to default group)
     public_group = get_public_group_for_twin(twin_id)
-    group_id = public_group["id"] if public_group else None
+    if public_group:
+        group_id = public_group["id"]
+    else:
+        # Fallback to default group for access permissions
+        from modules.access_groups import get_default_group
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We're already in an async context
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    default_group = pool.submit(asyncio.run, get_default_group(twin_id)).result()
+            else:
+                default_group = loop.run_until_complete(get_default_group(twin_id))
+            group_id = default_group["id"]
+            print(f"[PublicChat] Using default group {group_id} as fallback for twin {twin_id}")
+        except Exception as e:
+            print(f"[PublicChat] Warning: Could not get default group: {e}")
+            group_id = None
     
     # Emit message_received event for trigger matching
     triggered_actions = []

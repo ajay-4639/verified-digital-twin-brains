@@ -192,17 +192,24 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
         setDetectedType('file');
         setStage('ingesting');
         setProgress(20);
-        setStatusText(`Uploading ${file.name}...`);
+        setStatusText(`Uploading ${file.name}... (this may take up to 2 minutes)`);
 
         const formData = new FormData();
         formData.append('file', file);
+
+        // 3-minute timeout for large files
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 180000);
 
         try {
             const response = await fetch(`${API_BASE_URL}/ingest/file/${twinId}`, {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token}` },
                 body: formData,
+                signal: controller.signal,
             });
+
+            clearTimeout(timeoutId);
 
             if (!response.ok) {
                 const data = await response.json();
@@ -243,17 +250,24 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
         setDetectedType('file');
         setStage('ingesting');
         setProgress(20);
-        setStatusText(`Uploading ${file.name}...`);
+        setStatusText(`Uploading ${file.name}... (this may take up to 2 minutes)`);
 
         const formData = new FormData();
         formData.append('file', file);
+
+        // 3-minute timeout for large files
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 180000);
 
         try {
             const response = await fetch(`${API_BASE_URL}/ingest/file/${twinId}`, {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token}` },
                 body: formData,
+                signal: controller.signal,
             });
+
+            clearTimeout(timeoutId);
 
             if (!response.ok) {
                 const data = await response.json();

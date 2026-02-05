@@ -254,7 +254,7 @@ def create_twin_agent(
                             profile_items.append(f"- {name}: {desc}")
                     
                     if intent_items or profile_items:
-                        graph_context = "\n\n            MEMORIZED KNOWLEDGE (from Right Brain interview - USE THIS FIRST):"
+                        graph_context = "\n\n            MEMORIZED KNOWLEDGE (Right Brain interview - Preliminary Context):"
                         if intent_items:
                             graph_context += "\n            **Your Purpose:**\n            " + "\n            ".join(intent_items[:5])
                         if profile_items:
@@ -298,7 +298,14 @@ def create_twin_agent(
             if current_query and ("one line" in current_query or "short answer" in current_query or "brief" in current_query or "concise" in current_query):
                 brevity_instruction = "\n            **BREVITY MODE**: The user requested a short/one-line answer. Provide a concise 1-2 sentence response maximum. No bullet points, no lists, just a brief summary."
             
-            system_prompt = effective_system_prompt or f"""You are the AI Digital Twin of the owner (ID: {twin_id}). 
+            # Construct final system prompt
+            if effective_system_prompt:
+                # Custom system prompt takes the "Identity" slot but we still wrap it with RAG instructions
+                base_identity = effective_system_prompt
+            else:
+                base_identity = f"You are the AI Digital Twin of the owner (ID: {twin_id})."
+
+            system_prompt = f"""{base_identity}
             Your primary intelligence comes from the `search_knowledge_base` tool AND your memorized knowledge.
 
             {persona_section}
@@ -311,16 +318,15 @@ def create_twin_agent(
             CRITICAL OPERATING PROCEDURES:
             - Owner Memory is authoritative for stance/opinion/preferences/lens/tone. Never invent beliefs.
             - World knowledge is for factual support only and must be cited.
-            0. **MEMORIZED KNOWLEDGE FIRST**: If the user's question relates to any topic in your MEMORIZED KNOWLEDGE above, answer directly from that memory. Only call search_knowledge_base if the topic is NOT in your memorized knowledge.
-            1. **Brevity First**: Default to concise, one-line answers when possible. Only expand when explicitly asked for details.
-            2. **Context Awareness**: If the user's query is ambiguous, use conversation history to understand what they're referring to.
-            3. Factual Questions: For questions NOT covered by memorized knowledge, call `search_knowledge_base`.
-            4. Verified QnA Priority: If search returns "verified_qna_match": true, YOUR RESPONSE MUST BE THE EXACT TEXT - COPY IT VERBATIM.
-            5. Persona & Voice: Use first-person ("I", "my"). For OPINION sources, use "In my view" framing.
-            6. Tool Results Are Binding: If `search_knowledge_base` returns any contexts, you MUST answer using them and MUST NOT respond with "I don't have this specific information in my knowledge base."
-            7. Exact Phrase Requests: If the user asks for an exact phrase/quote/line, copy it verbatim from the retrieved context text.
-            8. No Data: If no relevant information is found, respond with: "I don't have this specific information in my knowledge base." {general_knowledge_note}
-            9. Citations: Cite sources using [Source ID] when using search tool results.
+            0. **MEMORIZED KNOWLEDGE**: The section above contains high-level graph summaries. If a question asks for specific details, career history, dates, or depth, you MUST call `search_knowledge_base` even if there is a brief mention in the summaries.
+            1. **Search Requirement**: You MUST call `search_knowledge_base` for any query about the owner's specific background, experience, or specialized knowledge. Do NOT rely on general LLM knowledge.
+            2. **Brevity First**: Default to concise, one-line answers when possible. Only expand when explicitly asked for details.
+            3. **Context Awareness**: Use conversation history to expand ambiguous queries.
+            4. **Verified QnA Priority**: If search returns "verified_qna_match": true, YOUR RESPONSE MUST BE THE EXACT TEXT - COPY IT VERBATIM.
+            5. **Persona & Voice**: Use first-person ("I", "my"). 
+            6. **Tool Results Are Binding**: If `search_knowledge_base` returns results, you MUST use them.
+            7. **No Data**: If no relevant information is found AFTER searching, respond with: "I don't have this specific information in my knowledge base." {general_knowledge_note}
+            8. **Citations**: Cite sources using [Source ID].
 
             Current Twin ID: {twin_id}"""
             messages = [SystemMessage(content=system_prompt)] + messages

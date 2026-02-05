@@ -1,4 +1,5 @@
 import os
+import asyncio
 from typing import Annotated, TypedDict, List, Dict, Any, Union, Optional
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
@@ -257,115 +258,158 @@ AGENTIC RAG OPERATING PROCEDURES:
 
     # Define the nodes
     async def planner_node(state: TwinState):
-        """Phase 1: Query Decomposition & Planning"""
+        """Phase 1: Intelligent Query Decomposition (Audit 2: LLM Planner)"""
         messages = state["messages"]
         last_human_msg = next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), "")
         
-        # Simple heuristic or LLM-based planning
-        # For Path B, we always try to see if it's a "Global" query
-        global_keywords = ["principles", "believe", "contradict", "everything", "all", "top"]
-        is_global = any(k in last_human_msg.lower() for k in global_keywords)
+        planning_prompt = f"""You are a Strategic Retrieval Planner for a Digital Twin.
+        Your goal is to decompose the user's query into 1-3 targeted sub-queries for RAG retrieval.
         
-        if is_global:
-            # Plan: Pull core stances + vector search on key terms
-            sub_queries = [last_human_msg, "core principles and stances", f"personal philosophy on {last_human_msg}"]
-        else:
-            sub_queries = [last_human_msg]
+        USER QUERY: {last_human_msg}
+        
+        OBJECTIVES:
+        1. If it's a 'Global' query (e.g., "What are my principles?", "Summarize everything"), generate sub-queries covering high-level concepts, personal philosophy, and recent stances.
+        2. If it's a 'Specific' query, generate refined versions of the query to maximize semantic match.
+        3. Identify if the query is asking for a CONTRADICTION check.
+        
+        OUTPUT FORMAT (JSON):
+        {{
+            "sub_queries": ["query 1", "query 2"],
+            "strategy": "global | specific | contradiction",
+            "reasoning": "Brief explanation of why these sub-queries were chosen"
+        }}
+        """
+        
+        try:
+            planner_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, model_kwargs={"response_format": {"type": "json_object"}})
+            res = await planner_llm.ainvoke([SystemMessage(content=planning_prompt)])
+            import json
+            plan = json.loads(res.content)
             
-        return {"sub_queries": sub_queries, "reasoning_history": ["Planning: Decomposed into sub-queries for broader coverage."]}
+            sub_queries = plan.get("sub_queries", [last_human_msg])
+            strategy = plan.get("strategy", "specific")
+            reasoning = plan.get("reasoning", "Direct retrieval.")
+            
+            return {
+                "sub_queries": sub_queries, 
+                "reasoning_history": (state.get("reasoning_history") or []) + [f"Planning ({strategy}): {reasoning}"]
+            }
+        except Exception as e:
+            print(f"Planning error: {e}")
+            return {"sub_queries": [last_human_msg], "reasoning_history": ["Planning fallback: Direct retrieval."]}
 
     async def retrieve_hybrid_node(state: TwinState):
-        """Phase 2: Executing planned retrieval"""
+        """Phase 2: Executing planned retrieval (Audit 1: Parallel & Robust)"""
         sub_queries = state.get("sub_queries", [])
         twin_id = state["twin_id"]
         messages = state["messages"]
         
         all_results = []
-        citations = list(state.get("citations", []))
+        citations = []
         total_score = 0
         score_count = 0
         
         # Create retrieval tool
         retrieval_tool = get_retrieval_tool(twin_id, group_id=group_id, conversation_history=messages)
         
-        for query in sub_queries:
-            # We call the tool function directly for speed, or via ToolNode
+        # Parallel execution of sub-queries (Performance Improvement)
+        async def safe_retrieve(query):
             try:
-                # search_knowledge_base is a sync/async function depending on implementation
-                # Assuming get_retrieval_tool returns a tool with an .ainvoke or .func
                 res_str = await retrieval_tool.ainvoke({"query": query})
                 import json
-                try:
-                    res_data = json.loads(res_str)
-                    if isinstance(res_data, list):
-                        for item in res_data:
-                            all_results.append(item)
-                            if "source_id" in item: citations.append(item["source_id"])
-                            if "score" in item:
-                                total_score += item.get("score", 0.7)
-                                score_count += 1
-                except:
-                    pass
+                return json.loads(res_str)
             except Exception as e:
                 print(f"Retrieval sub-query error ({query}): {e}")
+                return []
+
+        tasks = [safe_retrieve(q) for q in sub_queries]
+        results_list = await asyncio.gather(*tasks)
+        
+        for res_data in results_list:
+            if isinstance(res_data, list):
+                for item in res_data:
+                    all_results.append(item)
+                    if "source_id" in item:
+                        citations.append(item["source_id"])
+                    if "score" in item:
+                        total_score += item.get("score", 0.7)
+                        score_count += 1
 
         new_confidence = total_score / score_count if score_count > 0 else 0.0
         
         # Check for verified matches
-        has_verified = any(item.get("is_verified") or item.get("verified_qna_match") for item in all_results if isinstance(item, dict))
-        if has_verified: new_confidence = 1.0
+        has_verified = any(
+            item.get("is_verified") or item.get("verified_qna_match") 
+            for item in all_results if isinstance(item, dict)
+        )
+        if has_verified: 
+            new_confidence = 1.0
 
         return {
             "retrieved_context": {"results": all_results},
             "citations": list(set(citations)),
             "confidence_score": new_confidence,
-            "reasoning_history": state.get("reasoning_history", []) + [f"Retrieval: Gathered {len(all_results)} context matches."]
+            "reasoning_history": (state.get("reasoning_history") or []) + [f"Retrieval: Executed {len(sub_queries)} parallel sub-queries."]
         }
 
     async def synthesize_node(state: TwinState):
-        """Phase 3: Final Answer Construction & Contradiction Detection"""
+        """Phase 3: Final Answer Construction (Audit 3: Stance Compiler & Path C)"""
         messages = state["messages"]
         context_data = state.get("retrieved_context", {}).get("results", [])
+        settings = full_settings or {}
+        opinion_map = settings.get("opinion_map", {})
         
         # Prepare context for the prompt
-        context_str = "\n".join([f"[{i}] {res.get('text')}" for i, res in enumerate(context_data)])
+        context_str = ""
+        for i, res in enumerate(context_data):
+            text = res.get("text", "")
+            # Temporal Marker (Path C Preparation)
+            date_info = res.get("metadata", {}).get("effective_from", "Unknown Date")
+            source = res.get("source_id", "Unknown")
+            context_str += f"[{i}] (Date: {date_info} | ID: {source}): {text}\n"
         
         # Build the structured system prompt
         system_msg = build_system_prompt(state)
         
-        # Add context and specific Cross-Reference Instructions for Path B
+        # Stance Compiler: Inject core worldviews into the synthesis instruction
+        opinions_context = "\n".join([f"- {topic}: {data['stance']}" for topic, data in opinion_map.items()]) if opinion_map else "No specific opinions recorded."
+
         synthesis_instruction = f"""
 {system_msg}
 
-### RETRIEVED KNOWLEDGE SNIPPETS:
+### CORE WORLDVIEW (Authoritative Stance):
+{opinions_context}
+
+### RETRIEVED KNOWLEDGE (Chronological/Relevance Ordered):
 {context_str}
 
-### SYNTHESIS & CONTRADICTION CHECK:
-1. Examine the snippets for conflicting timestamps, stances, or facts.
-2. If the snippets show an EVOLUTION of belief (e.g., believing A in 2022 and B in 2024), prioritize the more recent one but acknowledge the shift.
-3. If they are directly contradictory without a clear reason, present both perspectives transparently: "On one hand, my records suggest X, but other entries indicate Y."
-4. Synthesize a unified answer that reflects the most authoritative "Digital Twin" stance.
+### PATH B GLOBAL REASONING & PATH C TEMPORAL INSTRUCTIONS:
+1. **Consistency Check**: Do the retrieved facts align with my CORE WORLDVIEW? If the knowledge contradicts my core beliefs, prioritize my belief but mention the conflicting data as a potential "point of growth" or "outside perspective".
+2. **Temporal Evolution**: Look at the dates in [brackets]. If my stance has changed over time, explain the EVOLUTION. (Path C Reasoning).
+3. **Citation Integrity**: Every sentence must point to [Source ID] or [bracket index].
+4. **Final Synthesis**: Provide a unified, first-person response that sounds like ME.
 """
 
-        # Ensure we don't blow up context but maintain thread identity
-        filtered_messages = [messages[0]] + messages[1:] if len(messages) > 10 else messages
-        
-        if not isinstance(filtered_messages[0], SystemMessage):
-            all_msgs = [SystemMessage(content=synthesis_instruction)] + filtered_messages
-        else:
-            all_msgs = [SystemMessage(content=synthesis_instruction)] + filtered_messages[1:]
+        # Context Management: Keep the system prompt and the last 5 human-ai turns
+        managed_messages = [SystemMessage(content=synthesis_instruction)]
+        if len(messages) > 1:
+            managed_messages.extend(messages[1:][-10:]) # Keep last 10 messages for context
             
-        response = await llm.ainvoke(all_msgs)
-        
-        # Heuristic to detect if LLM found contradictions in its own reasoning
-        contradiction_found = "on the other hand" in response.content.lower() or "contradict" in response.content.lower()
-        
-        return {
-            "messages": [response],
-            "reasoning_history": state.get("reasoning_history", []) + [
-                f"Synthesis: Unified {len(context_data)} sources. Contradiction Check: {'Nuance detected' if contradiction_found else 'Consistent'}."
-            ]
-        }
+        try:
+            response = await llm.ainvoke(managed_messages)
+            
+            # Post-processing: Check for citation density (Higher quality check)
+            has_citations = "[" in response.content or "Source" in response.content
+            
+            return {
+                "messages": [response],
+                "reasoning_history": (state.get("reasoning_history") or []) + [
+                    f"Synthesis: Integrated {len(context_data)} sources with Persona Opinions. Citations: {'Present' if has_citations else 'Low'}."
+                ]
+            }
+        except Exception as e:
+            print(f"Synthesis error: {e}")
+            return {"messages": [HumanMessage(content="I apologize, I encountered a reasoning error while synthesizing my knowledge.")]}
 
     # Define the graph
     workflow = StateGraph(TwinState)

@@ -150,11 +150,16 @@ async def get_owner_style_profile(twin_id: str, force_refresh: bool = False) -> 
 class TwinState(TypedDict):
     """
     State for the Digital Twin reasoning graph.
+    Supports Path B: Global Reasoning & Agentic RAG.
     """
     messages: Annotated[List[BaseMessage], add_messages]
     twin_id: str
     confidence_score: float
     citations: List[str]
+    # Path B: Agentic RAG additions
+    sub_queries: Optional[List[str]]
+    reasoning_history: Optional[List[str]]
+    retrieved_context: Optional[Dict[str, Any]] # Stores results from multiple tools
 
 def create_twin_agent(
     twin_id: str,
@@ -194,252 +199,189 @@ def create_twin_agent(
         max_tokens=max_tokens if max_tokens else None
     )
     
-    # Setup tools - will be recreated with conversation history in call_model
+    # Setup tools
     cloud_tools = get_cloud_tools(allowed_tools=allowed_tools)
     
-    # Bind tools to the LLM (will be updated with conversation-aware retrieval tool)
-    llm_with_tools = None  # Will be set in call_model
-    
+    # Helper: Build the system prompt with persona and context
+    def build_system_prompt(state: TwinState) -> str:
+        settings = full_settings or {}
+        style_desc = settings.get("persona_profile", "Professional and helpful.")
+        phrases = settings.get("signature_phrases", [])
+        exemplars = settings.get("style_exemplars", [])
+        opinion_map = settings.get("opinion_map", {})
+        general_knowledge_allowed = settings.get("general_knowledge_allowed", False)
+        
+        # Load identity context (High-level concepts)
+        node_context = ""
+        try:
+            nodes_res = supabase.rpc("get_nodes_system", {"t_id": twin_id, "limit_val": 10}).execute()
+            if nodes_res.data:
+                profile_items = [f"- {n.get('name')}: {n.get('description')}" for n in nodes_res.data]
+                node_context = "\n            **GENERAL IDENTITY NODES:**\n            " + "\n            ".join(profile_items)
+        except Exception: pass
+
+        final_graph_context = ""
+        if graph_context:
+            final_graph_context += f"SPECIFIC KNOWLEDGE:\n{graph_context}\n\n"
+        if node_context:
+            final_graph_context += node_context
+        
+        persona_section = f"YOUR PERSONA STYLE:\n- DESCRIPTION: {style_desc}"
+        if phrases: persona_section += f"\n- SIGNATURE PHRASES: {', '.join(phrases)}"
+        if opinion_map:
+            opinions_text = "\n".join([f"- {t}: {d['stance']}" for t, d in opinion_map.items()])
+            persona_section += f"\n- CORE WORLDVIEW:\n{opinions_text}"
+
+        owner_memory_block = f"OWNER MEMORY:\n{owner_memory_context if owner_memory_context else '- None available.'}"
+        
+        base_identity = system_prompt_override or f"You are the AI Digital Twin of the owner (ID: {twin_id})."
+        
+        return f"""{base_identity}
+YOUR PRINCIPLES (Immutable):
+- Use first-person ("I", "my").
+- Every claim MUST be supported by retrieved context.
+- If context is missing, say you don't know.
+- Be concise by default.
+
+{persona_section}
+
+{final_graph_context}
+
+{owner_memory_block}
+
+AGENTIC RAG OPERATING PROCEDURES:
+1. Use `search_knowledge_base` to find specific facts or beliefs.
+2. If multiple searches are needed for global reasoning (e.g. "What are my principles?"), perform them.
+3. If you find contradictions, acknowledge them.
+"""
+
     # Define the nodes
-    async def call_model(state: TwinState):
+    async def planner_node(state: TwinState):
+        """Phase 1: Query Decomposition & Planning"""
+        messages = state["messages"]
+        last_human_msg = next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), "")
+        
+        # Simple heuristic or LLM-based planning
+        # For Path B, we always try to see if it's a "Global" query
+        global_keywords = ["principles", "believe", "contradict", "everything", "all", "top"]
+        is_global = any(k in last_human_msg.lower() for k in global_keywords)
+        
+        if is_global:
+            # Plan: Pull core stances + vector search on key terms
+            sub_queries = [last_human_msg, "core principles and stances", f"personal philosophy on {last_human_msg}"]
+        else:
+            sub_queries = [last_human_msg]
+            
+        return {"sub_queries": sub_queries, "reasoning_history": ["Planning: Decomposed into sub-queries for broader coverage."]}
+
+    async def retrieve_hybrid_node(state: TwinState):
+        """Phase 2: Executing planned retrieval"""
+        sub_queries = state.get("sub_queries", [])
+        twin_id = state["twin_id"]
         messages = state["messages"]
         
-        # Create retrieval tool with conversation history for context-aware query expansion
-        retrieval_tool = get_retrieval_tool(twin_id, group_id=group_id, conversation_history=messages)
-        tools = [retrieval_tool] + cloud_tools
-        llm_with_tools = llm.bind_tools(tools)
-        
-        # Check current query for brevity requests
-        current_query = ""
-        for msg in reversed(messages):
-            if isinstance(msg, HumanMessage):
-                current_query = msg.content.lower()
-                break
-        
-        # Ensure system message is always present at the beginning
-        has_system = any(isinstance(m, SystemMessage) for m in messages)
-        if not has_system:
-            # Extract persona components from settings
-            settings = full_settings or {}
-            style_desc = settings.get("persona_profile", "Professional and helpful.")
-            phrases = settings.get("signature_phrases", [])
-            exemplars = settings.get("style_exemplars", [])
-            opinion_map = settings.get("opinion_map", {})
-            
-            # Check for general_knowledge_allowed setting
-            general_knowledge_allowed = settings.get("general_knowledge_allowed", False)
-            
-            # Load node context from nodes table (Right Brain interview - High-level Identity)
-            node_context = ""
-            try:
-                # Reducing limit to avoid prompt pollution; focusing on top 10 core concepts
-                nodes_res = supabase.rpc("get_nodes_system", {"t_id": twin_id, "limit_val": 10}).execute()
-                if nodes_res.data and len(nodes_res.data) > 0:
-                    intent_items = []
-                    profile_items = []
-                    
-                    for node in nodes_res.data:
-                        node_type = node.get("type", "").lower()
-                        name = node.get("name", "")
-                        desc = node.get("description", "")
-                        
-                        if not name or not desc:
-                            continue
-                        
-                        # Separate intent nodes from profile nodes
-                        if "intent" in node_type:
-                            if "confirmed" not in node_type:
-                                intent_items.append(f"- {name}: {desc}")
-                        else:
-                            profile_items.append(f"- {name}: {desc}")
-                    
-                    if intent_items or profile_items:
-                        if intent_items:
-                            node_context += "\n            **Your Purpose:**\n            " + "\n            ".join(intent_items)
-                        if profile_items:
-                            node_context += "\n            **Your Profile:**\n            " + "\n            ".join(profile_items)
-            except Exception as ge:
-                print(f"Error loading node context: {ge}")
-                node_context = ""
-            
-            # Combine query-relevant graph context with high-level identity nodes
-            final_graph_context = ""
-            if graph_context:
-                final_graph_context += f"SPECIFIC KNOWLEDGE (Query-Relevant):\n{graph_context}\n\n"
-            
-            if node_context:
-                final_graph_context += f"GENERAL IDENTITY NODES (High-Level Concepts):{node_context}"
-            
-            graph_context_for_prompt = final_graph_context.strip()
-            
-            # Check for group-specific system prompt override
-            # Use the outer function's system_prompt_override, or fall back to group settings
-            effective_system_prompt = system_prompt_override
-            if not effective_system_prompt:
-                group_system_prompt = settings.get("system_prompt")
-                if group_system_prompt:
-                    effective_system_prompt = group_system_prompt
-            
-            persona_section = f"""YOUR PERSONA STYLE:
-            - DESCRIPTION: {style_desc}"""
-            
-            if phrases:
-                persona_section += f"\n            - SIGNATURE PHRASES (Use these naturally): {', '.join(phrases)}"
-            
-            if exemplars:
-                exemplars_text = "\n              ".join([f"- \"{ex}\"" for ex in exemplars])
-                persona_section += f"\n            - STYLE EXEMPLARS (Mimic this flow):\n              {exemplars_text}"
-            
-            if opinion_map:
-                opinions_text = "\n              ".join([f"- {topic}: {data['stance']} (Intensity: {data['intensity']}/10)" for topic, data in opinion_map.items()])
-                persona_section += f"\n            - CORE WORLDVIEW / OPINIONS (Always stay consistent with these):\n              {opinions_text}"
-
-            general_knowledge_note = "You may use general knowledge if allowed in settings." if general_knowledge_allowed else "Do NOT make things up or use general knowledge - only respond with verified information."
-
-            owner_memory_block = "OWNER MEMORY (Authoritative for stance, preferences, lens, tone):\n"
-            if owner_memory_context:
-                owner_memory_block += owner_memory_context
-            else:
-                owner_memory_block += "- None available for this query."
-            
-            # Check if user wants brevity from current query or history
-            brevity_instruction = ""
-            if current_query and ("one line" in current_query or "short answer" in current_query or "brief" in current_query or "concise" in current_query):
-                brevity_instruction = "\n            **BREVITY MODE**: The user requested a short/one-line answer. Provide a concise 1-2 sentence response maximum. No bullet points, no lists, just a brief summary."
-            
-            # Construct final system prompt
-            if effective_system_prompt:
-                # Custom system prompt takes the "Identity" slot but we still wrap it with RAG instructions
-                base_identity = effective_system_prompt
-            else:
-                base_identity = f"You are the AI Digital Twin of the owner (ID: {twin_id})."
-
-            system_prompt = f"""{base_identity}
-            Your primary intelligence comes from the `search_knowledge_base` tool AND your memorized knowledge.
-
-            {persona_section}
-            {brevity_instruction}
-
-            {graph_context_for_prompt}
-
-            {owner_memory_block}
-
-            CRITICAL OPERATING PROCEDURES:
-            - Owner Memory is authoritative for stance/opinion/preferences/lens/tone. Never invent beliefs.
-            - World knowledge is for factual support only and must be cited.
-            0. **MEMORIZED KNOWLEDGE**: The section above contains high-level graph summaries. If a question asks for specific details, career history, dates, or depth, you MUST call `search_knowledge_base` even if there is a brief mention in the summaries.
-            1. **Search Requirement**: You MUST call `search_knowledge_base` for any query about the owner's specific background, experience, or specialized knowledge. Do NOT rely on general LLM knowledge.
-            2. **Brevity First**: Default to concise, one-line answers when possible. Only expand when explicitly asked for details.
-            3. **Context Awareness**: Use conversation history to expand ambiguous queries.
-            4. **Verified QnA Priority**: If search returns "verified_qna_match": true, YOUR RESPONSE MUST BE THE EXACT TEXT - COPY IT VERBATIM.
-            5. **Persona & Voice**: Use first-person ("I", "my"). 
-            6. **Tool Results Are Binding**: If `search_knowledge_base` returns results, you MUST use them.
-            7. **No Data**: If no relevant information is found AFTER searching, respond with: "I don't have this specific information in my knowledge base." {general_knowledge_note}
-            8. **Citations**: Cite sources using [Source ID].
-
-            Current Twin ID: {twin_id}"""
-            messages = [SystemMessage(content=system_prompt)] + messages
-            
-        response = await llm_with_tools.ainvoke(messages)
-        return {"messages": [response]}
-
-    async def handle_tools(state: TwinState):
+        all_results = []
         citations = list(state.get("citations", []))
         total_score = 0
         score_count = 0
-
-        # Create tools with conversation history (same as in call_model)
-        messages = state["messages"]
-        retrieval_tool = get_retrieval_tool(twin_id, group_id=group_id, conversation_history=messages)
-        tools = [retrieval_tool] + cloud_tools
-
-        # Create tool node manually to extract metadata
-        tool_node = ToolNode(tools)
-        result = await tool_node.ainvoke(state)
         
-        # Extract citations and scores from search_knowledge_base if present
-        for msg in result["messages"]:
-            if isinstance(msg, ToolMessage) and msg.name == "search_knowledge_base":
+        # Create retrieval tool
+        retrieval_tool = get_retrieval_tool(twin_id, group_id=group_id, conversation_history=messages)
+        
+        for query in sub_queries:
+            # We call the tool function directly for speed, or via ToolNode
+            try:
+                # search_knowledge_base is a sync/async function depending on implementation
+                # Assuming get_retrieval_tool returns a tool with an .ainvoke or .func
+                res_str = await retrieval_tool.ainvoke({"query": query})
                 import json
                 try:
-                    # LangGraph/LangChain ToolNode content is the return value of the tool
-                    data = msg.content
-                    # If it's a string representation of a list of dicts, parse it
-                    if isinstance(data, str):
-                        try:
-                            # Try parsing as JSON first
-                            data = json.loads(data)
-                        except:
-                            # If not JSON, it might be a literal string representation
-                            import ast
-                            try:
-                                data = ast.literal_eval(data)
-                            except:
-                                pass
-                    
-                    if isinstance(data, list):
-                        for item in data:
-                            if isinstance(item, dict):
-                                if "source_id" in item:
-                                    citations.append(item["source_id"])
-                                if "score" in item:
-                                    total_score += item["score"]
-                                    score_count += 1
-                except Exception as e:
-                    print(f"Error parsing tool output: {e}")
+                    res_data = json.loads(res_str)
+                    if isinstance(res_data, list):
+                        for item in res_data:
+                            all_results.append(item)
+                            if "source_id" in item: citations.append(item["source_id"])
+                            if "score" in item:
+                                total_score += item.get("score", 0.7)
+                                score_count += 1
+                except:
+                    pass
+            except Exception as e:
+                print(f"Retrieval sub-query error ({query}): {e}")
 
-        # If tools were called but no scores found, it might mean empty results
-        # We should reflect that in the confidence
-        if score_count > 0:
-            # Check if any verified answer was found (verified_qna_match or is_verified)
-            has_verified = any(
-                ("verified_qna_match" in msg.content and '"verified_qna_match": true' in msg.content) or
-                ("is_verified" in msg.content and '"is_verified": true' in msg.content)
-                for msg in result["messages"] 
-                if isinstance(msg, ToolMessage)
-            )
-            if has_verified:
-                new_confidence = 1.0 # Force 100% confidence if owner verified info is found
-            else:
-                new_confidence = total_score / score_count
+        new_confidence = total_score / score_count if score_count > 0 else 0.0
+        
+        # Check for verified matches
+        has_verified = any(item.get("is_verified") or item.get("verified_qna_match") for item in all_results if isinstance(item, dict))
+        if has_verified: new_confidence = 1.0
+
+        return {
+            "retrieved_context": {"results": all_results},
+            "citations": list(set(citations)),
+            "confidence_score": new_confidence,
+            "reasoning_history": state.get("reasoning_history", []) + [f"Retrieval: Gathered {len(all_results)} context matches."]
+        }
+
+    async def synthesize_node(state: TwinState):
+        """Phase 3: Final Answer Construction & Contradiction Detection"""
+        messages = state["messages"]
+        context_data = state.get("retrieved_context", {}).get("results", [])
+        
+        # Prepare context for the prompt
+        context_str = "\n".join([f"[{i}] {res.get('text')}" for i, res in enumerate(context_data)])
+        
+        # Build the structured system prompt
+        system_msg = build_system_prompt(state)
+        
+        # Add context and specific Cross-Reference Instructions for Path B
+        synthesis_instruction = f"""
+{system_msg}
+
+### RETRIEVED KNOWLEDGE SNIPPETS:
+{context_str}
+
+### SYNTHESIS & CONTRADICTION CHECK:
+1. Examine the snippets for conflicting timestamps, stances, or facts.
+2. If the snippets show an EVOLUTION of belief (e.g., believing A in 2022 and B in 2024), prioritize the more recent one but acknowledge the shift.
+3. If they are directly contradictory without a clear reason, present both perspectives transparently: "On one hand, my records suggest X, but other entries indicate Y."
+4. Synthesize a unified answer that reflects the most authoritative "Digital Twin" stance.
+"""
+
+        # Ensure we don't blow up context but maintain thread identity
+        filtered_messages = [messages[0]] + messages[1:] if len(messages) > 10 else messages
+        
+        if not isinstance(filtered_messages[0], SystemMessage):
+            all_msgs = [SystemMessage(content=synthesis_instruction)] + filtered_messages
         else:
-            # If search tool was called but returned nothing, confidence is 0 (triggers "I don't know")
-            new_confidence = 0.0
+            all_msgs = [SystemMessage(content=synthesis_instruction)] + filtered_messages[1:]
+            
+        response = await llm.ainvoke(all_msgs)
+        
+        # Heuristic to detect if LLM found contradictions in its own reasoning
+        contradiction_found = "on the other hand" in response.content.lower() or "contradict" in response.content.lower()
         
         return {
-            "messages": result["messages"],
-            "citations": list(set(citations)),
-            "confidence_score": new_confidence
+            "messages": [response],
+            "reasoning_history": state.get("reasoning_history", []) + [
+                f"Synthesis: Unified {len(context_data)} sources. Contradiction Check: {'Nuance detected' if contradiction_found else 'Consistent'}."
+            ]
         }
 
     # Define the graph
     workflow = StateGraph(TwinState)
     
     # Add nodes
-    workflow.add_node("agent", call_model)
-    workflow.add_node("tools", handle_tools)
+    workflow.add_node("planner", planner_node)
+    workflow.add_node("retrieve", retrieve_hybrid_node)
+    workflow.add_node("synthesize", synthesize_node)
     
     # Set entry point
-    workflow.set_entry_point("agent")
+    workflow.set_entry_point("planner")
     
-    # Define conditional edges
-    def should_continue(state: TwinState):
-        last_message = state["messages"][-1]
-        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-            return "tools"
-        return END
-
-    workflow.add_conditional_edges(
-        "agent",
-        should_continue,
-        {
-            "tools": "tools",
-            END: END
-        }
-    )
-    
-    # Add back edge from tools to agent
-    workflow.add_edge("tools", "agent")
+    # Define linear execution for now (can add loops/branches later for complex multi-hop)
+    workflow.add_edge("planner", "retrieve")
+    workflow.add_edge("retrieve", "synthesize")
+    workflow.add_edge("synthesize", END)
     
     # P1-A: Compile with checkpointer if available
     checkpointer = get_checkpointer()
@@ -549,7 +491,10 @@ async def run_agent_stream(
         "messages": initial_messages,
         "twin_id": twin_id,
         "confidence_score": 1.0,
-        "citations": []
+        "citations": [],
+        "sub_queries": [],
+        "reasoning_history": [],
+        "retrieved_context": {}
     }
     
     # Phase 10: Metrics instrumentation

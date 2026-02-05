@@ -294,7 +294,7 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
                 "file_size": 0,
                 "content_text": "",
                 "status": "processing",
-                "staging_status": "training"
+                "staging_status": "staged"
             }).execute()
             print(f"[YouTube] Created processing record for {source_id}")
             
@@ -573,7 +573,7 @@ async def ingest_youtube_transcript(source_id: str, twin_id: str, url: str):
             "content_text": text,
             "content_hash": content_hash,
             "status": "processed",
-            "staging_status": "training",
+            "staging_status": "staged",
             "extracted_text_length": len(text)
         }).execute()
 
@@ -804,7 +804,7 @@ async def ingest_x_thread(source_id: str, twin_id: str, url: str):
             "content_text": text,
             "content_hash": content_hash,
             "status": "processed",
-            "staging_status": "training",
+            "staging_status": "staged",
             "extracted_text_length": len(text)
         }).execute()
 
@@ -1092,7 +1092,7 @@ async def ingest_source(source_id: str, twin_id: str, file_path: str, filename: 
         "content_text": text,
         "content_hash": content_hash,
         "status": "processing",
-        "staging_status": "training",  # Valid values: staged, approved, rejected, training, live
+        "staging_status": "staged",  # Auto-indexes, goes to 'live' after indexing
         "extracted_text_length": len(text)
     }
 

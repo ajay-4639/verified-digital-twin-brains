@@ -57,7 +57,7 @@ class MediaIngester:
                 "twin_id": self.twin_id,
                 "filename": f"YouTube: {url}",
                 "status": "processing",
-                "staging_status": "training",
+                "staging_status": "staged",
                 "type": "youtube_video"
             }).execute()
             

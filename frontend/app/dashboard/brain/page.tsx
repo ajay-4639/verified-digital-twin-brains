@@ -205,31 +205,8 @@ export default function BrainGraphPage() {
                 </div>
 
                 <div className="flex items-center gap-4">
-                    {/* Approve Button */}
-                    <button
-                        onClick={handleApprove}
-                        disabled={approving || !data?.stats.node_count}
-                        className={`px-4 py-2 rounded-lg font-bold text-sm flex items-center gap-2 transition-all ${approving
-                            ? 'bg-gray-200 text-gray-400 cursor-wait'
-                            : data?.stats.node_count
-                                ? 'bg-green-600 text-white hover:bg-green-700 shadow-lg shadow-green-200'
-                                : 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                            }`}
-                    >
-                        {approving ? (
-                            <>
-                                <div className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full"></div>
-                                Approving...
-                            </>
-                        ) : (
-                            <>
-                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
-                                </svg>
-                                Approve Profile
-                            </>
-                        )}
-                    </button>
+                    {/* Approve button removed - all content auto-indexes now */}
+                    {null}
 
                     {/* Version History Toggle */}
                     {versions.length > 0 && (

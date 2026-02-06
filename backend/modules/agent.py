@@ -175,6 +175,7 @@ class TwinState(TypedDict):
     full_settings: Optional[Dict[str, Any]]
     graph_context: Optional[str]
     owner_memory_context: Optional[str]
+    system_prompt_override: Optional[str]
 
 def create_twin_agent(
     twin_id: str,
@@ -227,15 +228,19 @@ def build_system_prompt(state: TwinState) -> str:
     full_settings = state.get("full_settings") or {}
     graph_context = state.get("graph_context") or ""
     owner_memory_context = state.get("owner_memory_context") or ""
+    system_prompt_override = (state.get("system_prompt_override") or "").strip()
     
     style_desc = full_settings.get("persona_profile", "Professional and helpful.")
     phrases = full_settings.get("signature_phrases", [])
     opinion_map = full_settings.get("opinion_map", {})
+    default_system_prompt = (full_settings.get("system_prompt") or "").strip()
+    custom_instructions = system_prompt_override or default_system_prompt
+    public_intro = (full_settings.get("public_intro") or "").strip()
+    intent_profile = full_settings.get("intent_profile") or {}
     
     # Load identity context (High-level concepts)
     node_context = ""
     try:
-        from modules.database import supabase
         nodes_res = supabase.rpc("get_nodes_system", {"t_id": twin_id, "limit_val": 10}).execute()
         if nodes_res.data:
             profile_items = [f"- {n.get('name')}: {n.get('description')}" for n in nodes_res.data]
@@ -255,6 +260,22 @@ def build_system_prompt(state: TwinState) -> str:
         persona_section += f"\n- CORE WORLDVIEW:\n{opinions_text}"
 
     owner_memory_block = f"OWNER MEMORY:\n{owner_memory_context if owner_memory_context else '- None available.'}"
+    custom_instructions_block = f"CUSTOM INSTRUCTIONS:\n{custom_instructions}\n" if custom_instructions else ""
+    public_intro_block = f"PUBLIC INTRO (use when asked to introduce yourself):\n{public_intro}\n" if public_intro else ""
+    intent_block = ""
+    if isinstance(intent_profile, dict) and intent_profile:
+        use_case = (intent_profile.get("use_case") or "").strip()
+        audience = (intent_profile.get("audience") or "").strip()
+        boundaries = (intent_profile.get("boundaries") or "").strip()
+        intent_lines = []
+        if use_case:
+            intent_lines.append(f"- Primary use case: {use_case}")
+        if audience:
+            intent_lines.append(f"- Audience: {audience}")
+        if boundaries:
+            intent_lines.append(f"- Boundaries: {boundaries}")
+        if intent_lines:
+            intent_block = "INTENT PROFILE:\n" + "\n".join(intent_lines) + "\n"
     
     return f"""You are the AI Digital Twin of the owner (ID: {twin_id}).
 YOUR PRINCIPLES (Immutable):
@@ -262,7 +283,11 @@ YOUR PRINCIPLES (Immutable):
 - Every claim MUST be supported by retrieved context.
 - If context is missing, say you don't know.
 - Be concise by default.
+- PUBLIC INTRO and INTENT PROFILE are owner-provided facts and may be used for self-description.
 
+{custom_instructions_block}
+{public_intro_block}
+{intent_block}
 {persona_section}
 
 {final_graph_context}
@@ -340,12 +365,24 @@ async def evidence_gate_node(state: TwinState):
     is_specific = state.get("target_owner_scope", False)
     context = state.get("retrieved_context", {}).get("results", [])
     last_human_msg = next((m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), "")
+    requires_evidence = state.get("requires_evidence", True)
     
     # Hard Gate Logic
     requires_teaching = False
     reason = "Sufficient evidence found."
+
+    if mode == "SMALLTALK":
+        return {
+            "dialogue_mode": mode,
+            "requires_teaching": False,
+            "reasoning_history": (state.get("reasoning_history") or []) + ["Gate: SKIP (smalltalk)"]
+        }
+
+    if requires_evidence and not context:
+        requires_teaching = True
+        reason = "No evidence retrieved for an evidence-required query."
     
-    if is_specific:
+    if (not requires_teaching) and is_specific:
         if not context:
             requires_teaching = True
             reason = "No evidence found for person-specific query."
@@ -491,11 +528,12 @@ def create_twin_agent(
     system_prompt_override: str = None,
     full_settings: dict = None,
     graph_context: str = "",
-    owner_memory_context: str = ""
+    owner_memory_context: str = "",
+    conversation_history: Optional[List[BaseMessage]] = None
 ):
     # Retrieve-only tool setup needs to stay inside or be passed
     from modules.tools import get_retrieval_tool
-    retrieval_tool = get_retrieval_tool(twin_id, group_id=group_id)
+    retrieval_tool = get_retrieval_tool(twin_id, group_id=group_id, conversation_history=conversation_history)
 
     async def retrieve_hybrid_node(state: TwinState):
         """Phase 2: Executing planned retrieval (Audit 1: Parallel & Robust)"""
@@ -643,7 +681,8 @@ async def run_agent_stream(
         system_prompt_override=system_prompt,
         full_settings=settings,
         graph_context=graph_context,
-        owner_memory_context=owner_memory_context
+        owner_memory_context=owner_memory_context,
+        conversation_history=history
     )
     
     initial_messages = history or []
@@ -666,7 +705,8 @@ async def run_agent_stream(
         # Path B / Phase 4 Context
         "full_settings": settings,
         "graph_context": graph_context,
-        "owner_memory_context": owner_memory_context
+        "owner_memory_context": owner_memory_context,
+        "system_prompt_override": system_prompt
     }
     
     # Phase 10: Metrics instrumentation

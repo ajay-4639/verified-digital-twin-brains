@@ -15,6 +15,7 @@ from modules.owner_memory_store import (
     format_owner_memory_context
 )
 from modules.clarification_manager import build_clarification
+from modules.observability import supabase
 
 
 STANCE_PATTERNS = [
@@ -38,10 +39,67 @@ PREFERENCE_KEYWORDS = {"prefer", "preference", "like", "dislike", "favorite", "f
 TONE_KEYWORDS = {"tone", "voice", "style", "sound", "wording", "phrasing"}
 LENS_KEYWORDS = {"lens", "framework", "principle", "values", "philosophy"}
 BELIEF_KEYWORDS = {"belief", "conviction"}
+GOAL_KEYWORDS = {"goal", "goals", "objective", "objectives", "aim", "aims", "target"}
+INTENT_KEYWORDS = {"intent", "intention", "trying to", "want to", "plan to", "planning to"}
+CONSTRAINT_KEYWORDS = {"constraint", "constraints", "limitation", "limitations", "restricted", "must", "can't", "cannot"}
+BOUNDARY_KEYWORDS = {"boundary", "boundaries", "won't", "will not", "never"}
 
 
 def _contains_any(text: str, keywords: set) -> bool:
     return any(k in text for k in keywords)
+
+
+def _load_intent_profile(twin_id: str) -> Dict[str, str]:
+    try:
+        twin_res = supabase.rpc("get_twin_system", {"t_id": twin_id}).single().execute()
+        settings = twin_res.data.get("settings", {}) if twin_res.data else {}
+        profile = settings.get("intent_profile") or {}
+        if not isinstance(profile, dict):
+            return {}
+        return {
+            "use_case": (profile.get("use_case") or "").strip(),
+            "audience": (profile.get("audience") or "").strip(),
+            "boundaries": (profile.get("boundaries") or "").strip()
+        }
+    except Exception as e:
+        print(f"[IdentityGate] Failed to load intent profile: {e}")
+        return {}
+
+
+def _intent_profile_to_memories(
+    profile: Dict[str, str],
+    include_use_case: bool,
+    include_audience: bool,
+    include_boundaries: bool,
+    boundary_memory_type: str
+) -> List[Dict[str, Any]]:
+    memories: List[Dict[str, Any]] = []
+    use_case = (profile.get("use_case") or "").strip()
+    audience = (profile.get("audience") or "").strip()
+    boundaries = (profile.get("boundaries") or "").strip()
+
+    if include_use_case and use_case:
+        memories.append({
+            "memory_type": "belief",
+            "topic_normalized": "intent",
+            "value": use_case,
+            "confidence": 0.9
+        })
+    if include_audience and audience:
+        memories.append({
+            "memory_type": "belief",
+            "topic_normalized": "audience",
+            "value": audience,
+            "confidence": 0.9
+        })
+    if include_boundaries and boundaries:
+        memories.append({
+            "memory_type": boundary_memory_type or "tone_rule",
+            "topic_normalized": "boundaries",
+            "value": boundaries,
+            "confidence": 0.9
+        })
+    return memories
 
 
 def classify_query(query: str) -> Dict[str, Any]:
@@ -55,6 +113,12 @@ def classify_query(query: str) -> Dict[str, Any]:
         return {"requires_owner": True, "memory_type": "preference"}
     if _contains_any(q, BELIEF_KEYWORDS):
         return {"requires_owner": True, "memory_type": "belief"}
+    if _contains_any(q, GOAL_KEYWORDS) or _contains_any(q, INTENT_KEYWORDS):
+        return {"requires_owner": True, "memory_type": "belief"}
+    if _contains_any(q, CONSTRAINT_KEYWORDS):
+        return {"requires_owner": True, "memory_type": "lens"}
+    if _contains_any(q, BOUNDARY_KEYWORDS):
+        return {"requires_owner": True, "memory_type": "tone_rule"}
 
     for pattern in STANCE_PATTERNS:
         if re.search(pattern, q):
@@ -95,6 +159,11 @@ async def run_identity_gate(
             "owner_memory_context": ""
         }
 
+    q_lower = (query or "").lower()
+    wants_intent = _contains_any(q_lower, GOAL_KEYWORDS) or _contains_any(q_lower, INTENT_KEYWORDS)
+    wants_constraints = _contains_any(q_lower, CONSTRAINT_KEYWORDS)
+    wants_boundaries = _contains_any(q_lower, BOUNDARY_KEYWORDS)
+
     topic = extract_topic_from_query(query, history)
     candidates = find_owner_memory_candidates(
         query=query,
@@ -108,6 +177,28 @@ async def run_identity_gate(
     has_conflict = detect_conflicts(candidates[:3]) if candidates else False
 
     if not candidates or best_score < 0.70 or has_conflict:
+        if not candidates or best_score < 0.70:
+            if wants_intent or wants_constraints or wants_boundaries:
+                profile = _load_intent_profile(twin_id)
+                if profile:
+                    intent_memories = _intent_profile_to_memories(
+                        profile=profile,
+                        include_use_case=wants_intent,
+                        include_audience=wants_intent,
+                        include_boundaries=(wants_boundaries or wants_constraints),
+                        boundary_memory_type=memory_type if memory_type in {"lens", "tone_rule"} else "tone_rule"
+                    )
+                    if intent_memories:
+                        return {
+                            "decision": "ANSWER",
+                            "requires_owner": True,
+                            "memory_type": memory_type,
+                            "topic": topic,
+                            "reason": "intent_profile_fallback",
+                            "owner_memory": intent_memories,
+                            "owner_memory_refs": [],
+                            "owner_memory_context": format_owner_memory_context(intent_memories)
+                        }
         clarification = build_clarification(query, topic, memory_type or "stance")
         return {
             "decision": "CLARIFY",

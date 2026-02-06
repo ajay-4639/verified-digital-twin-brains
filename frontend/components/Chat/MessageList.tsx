@@ -23,6 +23,14 @@ interface MessageListProps {
   messages: Message[];
   loading: boolean;
   isSearching: boolean;
+  enableRemember?: boolean;
+  onRemember?: (payload: {
+    value: string;
+    topic: string;
+    memory_type: string;
+    stance?: string;
+    intensity?: number;
+  }) => Promise<void>;
 }
 
 function formatTimestamp(ts?: number): string {
@@ -145,8 +153,20 @@ export function MessageSkeleton() {
 
 // Memoized component to prevent re-rendering of the message list when input changes.
 // This improves performance significantly as the message list grows.
-const MessageList = React.memo(({ messages, loading, isSearching }: MessageListProps) => {
+const MessageList = React.memo(({ messages, loading, isSearching, enableRemember = false, onRemember }: MessageListProps) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [rememberingId, setRememberingId] = useState<number | null>(null);
+  const [rememberDraft, setRememberDraft] = useState({
+    topic: '',
+    memory_type: 'belief',
+    stance: '',
+    intensity: 5
+  });
+  const [rememberSaving, setRememberSaving] = useState(false);
+  const [rememberError, setRememberError] = useState<string | null>(null);
+
+  const MEMORY_TYPES = ['belief', 'preference', 'stance', 'lens', 'tone_rule'];
+  const STANCE_OPTIONS = ['', 'positive', 'negative', 'neutral', 'mixed', 'unknown'];
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -231,7 +251,106 @@ const MessageList = React.memo(({ messages, loading, isSearching }: MessageListP
                 {msg.role === 'assistant' && (
                   <MessageReactions messageId={idx} />
                 )}
+                {msg.role === 'assistant' && enableRemember && (
+                  <button
+                    onClick={() => {
+                      setRememberingId(idx);
+                      setRememberDraft({
+                        topic: '',
+                        memory_type: 'belief',
+                        stance: '',
+                        intensity: 5
+                      });
+                      setRememberError(null);
+                    }}
+                    className="opacity-0 group-hover:opacity-100 text-[10px] font-bold uppercase tracking-wider text-indigo-600 hover:text-indigo-800"
+                    title="Remember this response"
+                  >
+                    Remember
+                  </button>
+                )}
               </div>
+
+              {msg.role === 'assistant' && rememberingId === idx && (
+                <div className="mt-3 rounded-2xl border border-indigo-100 bg-indigo-50 p-3 space-y-2">
+                  <div className="text-[10px] uppercase tracking-wider text-indigo-600 font-bold">Save to Memory</div>
+                  <input
+                    type="text"
+                    value={rememberDraft.topic}
+                    onChange={(e) => setRememberDraft((prev) => ({ ...prev, topic: e.target.value }))}
+                    placeholder="Topic (e.g., pricing, hiring, AI safety)"
+                    className="w-full bg-white border border-indigo-100 rounded-lg px-3 py-2 text-xs text-slate-800 placeholder-slate-400"
+                  />
+                  <select
+                    value={rememberDraft.memory_type}
+                    onChange={(e) => setRememberDraft((prev) => ({ ...prev, memory_type: e.target.value }))}
+                    className="w-full bg-white border border-indigo-100 rounded-lg px-3 py-2 text-xs text-slate-800"
+                  >
+                    {MEMORY_TYPES.map((t) => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </select>
+                  <div className="grid grid-cols-2 gap-2">
+                    <select
+                      value={rememberDraft.stance}
+                      onChange={(e) => setRememberDraft((prev) => ({ ...prev, stance: e.target.value }))}
+                      className="w-full bg-white border border-indigo-100 rounded-lg px-3 py-2 text-xs text-slate-800"
+                    >
+                      {STANCE_OPTIONS.map((s) => (
+                        <option key={s || 'none'} value={s}>{s || 'stance (optional)'}</option>
+                      ))}
+                    </select>
+                    <input
+                      type="number"
+                      min={0}
+                      max={10}
+                      value={rememberDraft.intensity}
+                      onChange={(e) => setRememberDraft((prev) => ({ ...prev, intensity: Number(e.target.value) }))}
+                      className="w-full bg-white border border-indigo-100 rounded-lg px-3 py-2 text-xs text-slate-800"
+                      placeholder="Intensity (0-10)"
+                    />
+                  </div>
+                  {rememberError && (
+                    <div className="text-[10px] text-rose-600">{rememberError}</div>
+                  )}
+                  <div className="flex justify-end gap-2">
+                    <button
+                      onClick={() => setRememberingId(null)}
+                      className="px-3 py-1.5 text-[10px] font-bold text-slate-600 bg-white rounded-lg border border-slate-200"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={async () => {
+                        if (!rememberDraft.topic.trim()) {
+                          setRememberError('Topic is required.');
+                          return;
+                        }
+                        setRememberSaving(true);
+                        try {
+                          await onRemember?.({
+                            value: msg.content,
+                            topic: rememberDraft.topic.trim(),
+                            memory_type: rememberDraft.memory_type,
+                            stance: rememberDraft.stance || undefined,
+                            intensity: rememberDraft.intensity
+                          });
+                          setRememberingId(null);
+                        } catch (err) {
+                          console.error(err);
+                          setRememberError('Failed to save memory.');
+                        } finally {
+                          setRememberSaving(false);
+                        }
+                      }}
+                      disabled={rememberSaving}
+                      className="px-3 py-1.5 text-[10px] font-bold text-white bg-indigo-600 rounded-lg disabled:opacity-50"
+                    >
+                      {rememberSaving ? 'Saving...' : 'Save'}
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {msg.role === 'assistant' && (msg.citations || msg.confidence_score !== undefined || msg.graph_used || msg.used_owner_memory) && (
                 <div className="flex flex-wrap gap-2 px-1">

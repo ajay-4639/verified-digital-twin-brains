@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 @pytest.mark.network
+@pytest.mark.asyncio
 async def test_e2e_extraction():
     """
     Real E2E test: Extract nodes from sample content text.

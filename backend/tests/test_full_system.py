@@ -38,9 +38,12 @@ def _override_auth_and_supabase():
 
 class TestFullSystemFlow(unittest.TestCase):
     
+    @patch('routers.chat.run_identity_gate', new_callable=AsyncMock)
+    @patch('routers.chat.get_default_group', new_callable=AsyncMock)
+    @patch('routers.chat.get_user_group', new_callable=AsyncMock)
     @patch('modules.reasoning_engine.ReasoningEngine.predict_stance')
     @patch('modules.graph_context.get_graph_stats')
-    def test_life_of_a_thought(self, mock_stats, mock_predict):
+    def test_life_of_a_thought(self, mock_stats, mock_predict, mock_get_user_group, mock_get_default_group, mock_run_gate):
         """
         Verify end-to-end flow:
         User asks "Would I...?" -> Reasoning Engine -> Decision Trace -> API Response
@@ -48,7 +51,19 @@ class TestFullSystemFlow(unittest.TestCase):
         # 1. Setup Twins State (Mock Graph)
         mock_stats.return_value = {"has_graph": True, "node_count": 50}
         
-        # 2. Mock Reasoning Result
+        # 2. Mock Group Resolution + Identity Gate
+        mock_get_user_group.return_value = None
+        mock_get_default_group.return_value = {"id": "group-default"}
+        mock_run_gate.return_value = {
+            "decision": "ANSWER",
+            "requires_owner": False,
+            "reason": "test_override",
+            "owner_memory": [],
+            "owner_memory_refs": [],
+            "owner_memory_context": ""
+        }
+
+        # 3. Mock Reasoning Result
         mock_trace = DecisionTrace(
             topic="Space Travel",
             final_stance=StanceType.POSITIVE,
@@ -61,7 +76,7 @@ class TestFullSystemFlow(unittest.TestCase):
         )
         mock_predict.return_value = mock_trace
         
-        # 3. Simulate User Query
+        # 4. Simulate User Query
         query = "Would I want to go to Mars?"
         response = client.post(
             "/chat/twin-123",
@@ -70,7 +85,7 @@ class TestFullSystemFlow(unittest.TestCase):
         
         self.assertEqual(response.status_code, 200)
         
-        # 4. Analyze Stream Response
+        # 5. Analyze Stream Response
         stream_content = response.text
         blocks = []
         for line in stream_content.strip().split('\n'):
@@ -78,7 +93,7 @@ class TestFullSystemFlow(unittest.TestCase):
                 try: blocks.append(json.loads(line))
                 except: pass
                 
-        # 5. Verify Decision Trace is present in Metadata
+        # 6. Verify Decision Trace is present in Metadata
         metadata = next((b for b in blocks if b.get("type") == "metadata"), None)
         self.assertIsNotNone(metadata, "Metadata block missing from response")
         self.assertIn("decision_trace", metadata, "Decision trace missing from metadata")
@@ -88,7 +103,7 @@ class TestFullSystemFlow(unittest.TestCase):
         self.assertEqual(trace["confidence_score"], 0.99)
         self.assertEqual(len(trace["logic_chain"]), 2)
         
-        # 6. Verify Content Block matches trace readable output
+        # 7. Verify Content Block matches trace readable output
         content_block = next((b for b in blocks if b.get("type") == "content"), None)
         self.assertIsNotNone(content_block)
         self.assertIn("POSITIVE", content_block["content"])

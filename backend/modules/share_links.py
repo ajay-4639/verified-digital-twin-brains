@@ -147,18 +147,21 @@ def validate_share_token(token: str, twin_id: str) -> bool:
         if expires_at_str:
             try:
                 expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
-                if datetime.now(expires_at.tzinfo) > expires_at:
-                    AuditLogger.log(
-                        tenant_id=_get_tenant_id(twin_id),
-                        twin_id=twin_id, 
-                        event_type="SECURITY", 
-                        action="SHARE_TOKEN_EXPIRED", 
-                        metadata={"expired_at": expires_at_str}
-                    )
-                    return False
-
             except Exception as parse_err:
                 print(f"Error parsing share token expiry: {parse_err}")
+            else:
+                if datetime.now(expires_at.tzinfo) > expires_at:
+                    try:
+                        AuditLogger.log(
+                            tenant_id=_get_tenant_id(twin_id),
+                            twin_id=twin_id,
+                            event_type="SECURITY",
+                            action="SHARE_TOKEN_EXPIRED",
+                            metadata={"expired_at": expires_at_str}
+                        )
+                    except Exception as log_err:
+                        print(f"Error logging share token expiry: {log_err}")
+                    return False
         
         # Log successful access (at reduced frequency to avoid log spam)
         # AuditLogger.log(twin_id, "ACCESS", "SHARE_LINK_ACCESSED", metadata={})

@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 
 
 @pytest.mark.asyncio
@@ -25,7 +25,10 @@ async def test_retrieve_context_structure():
          patch("modules.retrieval.get_embedding", return_value=[0.1]*3072), \
          patch("modules.retrieval.expand_query", return_value=["query var"]), \
          patch("modules.retrieval.generate_hyde_answer", return_value="hyde answer"), \
-         patch("modules.retrieval.get_embeddings_async", return_value=[[0.1]*3072]*3):
+         patch("modules.retrieval.get_embeddings_async", return_value=[[0.1]*3072]*3), \
+         patch("modules.retrieval.get_ranker", return_value=None), \
+         patch("modules.retrieval.get_default_group", new_callable=AsyncMock, side_effect=ValueError("no default group")), \
+         patch("modules.retrieval.match_verified_qna", new_callable=AsyncMock, return_value=None):
         
         results = await retrieve_context("test query", "twin-456")
         

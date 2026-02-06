@@ -71,17 +71,55 @@ def extract_topic_from_query(query: str, history: Optional[List[Dict[str, Any]]]
     return _normalize_text(query)[:80]
 
 
-def list_owner_memories(twin_id: str, status: str = "active", limit: int = 200) -> List[Dict[str, Any]]:
+def list_owner_memories(twin_id: str, status: Optional[str] = "active", limit: int = 200) -> List[Dict[str, Any]]:
     try:
         query = supabase.table("owner_beliefs").select("*").eq("twin_id", twin_id)
-        if status:
-            query = query.eq("status", status)
+        if status and status != "all":
+            if status == "active":
+                # Treat verified memories as active for retrieval/UI compatibility
+                query = query.in_("status", ["active", "verified"])
+            else:
+                query = query.eq("status", status)
         res = query.order("created_at", desc=True).limit(limit).execute()
         return res.data or []
     except Exception as e:
         # Table may not exist yet if migration not applied
         print(f"[OwnerMemory] list_owner_memories failed: {e}")
         return []
+
+
+def list_owner_memory_history(
+    twin_id: str,
+    topic_normalized: str,
+    memory_type: Optional[str] = None,
+    limit: int = 50
+) -> List[Dict[str, Any]]:
+    try:
+        query = supabase.table("owner_beliefs").select("*").eq("twin_id", twin_id).eq("topic_normalized", topic_normalized)
+        if memory_type:
+            query = query.eq("memory_type", memory_type)
+        res = query.order("created_at", desc=True).limit(limit).execute()
+        return res.data or []
+    except Exception as e:
+        print(f"[OwnerMemory] list_owner_memory_history failed: {e}")
+        return []
+
+
+def suggest_topic_from_value(value: str, max_tokens: int = 6) -> str:
+    tokens = _tokenize(value)
+    if tokens:
+        return " ".join(tokens[:max_tokens])
+    normalized = _normalize_text(value)
+    return normalized[:80] if normalized else "general"
+
+
+def get_owner_memory(memory_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        res = supabase.table("owner_beliefs").select("*").eq("id", memory_id).single().execute()
+        return res.data if res.data else None
+    except Exception as e:
+        print(f"[OwnerMemory] get_owner_memory failed: {e}")
+        return None
 
 
 def _lexical_overlap(a: str, b: str) -> float:
@@ -197,7 +235,8 @@ def create_owner_memory(
     intensity: Optional[int] = None,
     confidence: float = 0.7,
     provenance: Optional[Dict[str, Any]] = None,
-    supersede_id: Optional[str] = None
+    supersede_id: Optional[str] = None,
+    status: Optional[str] = "verified"
 ) -> Optional[Dict[str, Any]]:
     try:
         embedding = None
@@ -205,6 +244,11 @@ def create_owner_memory(
             embedding = get_embedding(f"{topic_normalized}. {value}")
         except Exception as e:
             print(f"[OwnerMemory] embedding generation failed: {e}")
+
+        provenance = provenance or {}
+        source_type = provenance.get("source_type") or provenance.get("source") or "manual"
+        source_id = provenance.get("source_id") or provenance.get("clarification_id")
+        owner_id = provenance.get("owner_id")
 
         insert_data = {
             "tenant_id": tenant_id,
@@ -214,13 +258,13 @@ def create_owner_memory(
             "value": value,
             "stance": stance,
             "intensity": intensity,
-            "confidence": 1.0, # Owner verified is 1.0
-            "status": "verified", # Phase 4 Memory Tiers
+            "confidence": confidence,
+            "status": status or "verified", # Phase 4 Memory Tiers
             "embedding": embedding,
             "provenance": {
-                "source_type": "interview",
-                "source_id": provenance.get("clarification_id") if provenance else None,
-                "owner_id": provenance.get("owner_id") if provenance else None,
+                "source_type": source_type,
+                "source_id": source_id,
+                "owner_id": owner_id,
                 "timestamp": datetime.utcnow().isoformat()
             },
             "updated_at": datetime.utcnow().isoformat()

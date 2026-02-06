@@ -17,6 +17,7 @@ import httpx
 
 from modules.auth_guard import get_current_user
 from modules.observability import supabase
+from modules.owner_memory_store import create_owner_memory, suggest_topic_from_value
 
 router = APIRouter(prefix="/api/interview", tags=["interview"])
 
@@ -101,7 +102,7 @@ class ContextBundleResponse(BaseModel):
 # Helper Functions
 # =============================================================================
 
-def _build_system_prompt(context_bundle: str) -> str:
+def _build_system_prompt(context_bundle: str, intent_profile: Optional[Dict[str, Any]] = None, public_intro: Optional[str] = None) -> str:
     """Build the system prompt for the Realtime interview session."""
     base_prompt = """You are conducting a conversational interview to learn about the user. Your goal is to understand their:
 
@@ -118,18 +119,57 @@ Guidelines:
 - Don't interrogate - this should feel natural
 - If they seem uncomfortable with a topic, gracefully move on
 - Summarize key points periodically to confirm understanding
+- If an INTENT PROFILE is provided, validate it first:
+  - Ask one clear question about the primary use case
+  - Ask one clear question about the audience/outcomes
+  - Ask one clear question about boundaries (what to avoid or never do)
+  - Only after validating intent should you move to goals, constraints, and preferences
 
 Keep responses concise - you're interviewing, not lecturing."""
 
+    intent_block = ""
+    if intent_profile:
+        use_case = (intent_profile.get("use_case") or "").strip()
+        audience = (intent_profile.get("audience") or "").strip()
+        boundaries = (intent_profile.get("boundaries") or "").strip()
+        intent_lines = []
+        if use_case:
+            intent_lines.append(f"- Primary use case: {use_case}")
+        if audience:
+            intent_lines.append(f"- Audience: {audience}")
+        if boundaries:
+            intent_lines.append(f"- Boundaries: {boundaries}")
+        if intent_lines:
+            intent_block = "INTENT PROFILE (tailor questions around this):\n" + "\n".join(intent_lines)
+
+    public_intro = (public_intro or "").strip()
+    public_block = f"PUBLIC INTRO (how the user wants to be known):\n{public_intro}" if public_intro else ""
+
+    extra_blocks = "\n\n".join([b for b in [intent_block, public_block] if b])
+    prompt = base_prompt
+    if extra_blocks:
+        prompt = f"{prompt}\n\n{extra_blocks}"
     if context_bundle:
-        return f"""{base_prompt}
+        prompt = f"""{prompt}
 
 === WHAT YOU ALREADY KNOW ABOUT THIS USER ===
 {context_bundle}
 
 Use this context to personalize your questions and avoid re-asking things you already know. Reference this knowledge naturally when relevant."""
-    
-    return base_prompt
+    return prompt
+
+
+def _map_interview_memory_type(mem_type: str) -> str:
+    """Map interview memory types to owner memory types."""
+    mem_type = (mem_type or "").lower().strip()
+    if mem_type == "preference":
+        return "preference"
+    if mem_type == "constraint":
+        return "lens"
+    if mem_type == "boundary":
+        return "tone_rule"
+    # intent, goal -> belief by default
+    return "belief"
 
 
 async def _get_user_context(user_id: str, task: str = "interview") -> str:
@@ -271,9 +311,21 @@ async def create_interview_session(
     
     # Get context from prior sessions
     context_bundle = await _get_user_context(user_id, "interview")
+
+    # Load intent profile + public intro from twin settings if available
+    intent_profile = {}
+    public_intro = ""
+    if twin_id:
+        try:
+            twin_res = supabase.rpc("get_twin_system", {"t_id": twin_id}).single().execute()
+            settings = twin_res.data.get("settings", {}) if twin_res.data else {}
+            intent_profile = settings.get("intent_profile") or {}
+            public_intro = settings.get("public_intro") or ""
+        except Exception as e:
+            print(f"Warning: failed to load intent profile: {e}")
     
     # Build system prompt
-    system_prompt = _build_system_prompt(context_bundle)
+    system_prompt = _build_system_prompt(context_bundle, intent_profile=intent_profile, public_intro=public_intro)
     
     # Create session record
     session_id = str(uuid.uuid4())
@@ -326,6 +378,40 @@ async def finalize_interview_session(
         request.transcript,
         session_id
     )
+
+    # Store extracted memories as proposed owner memories (for approval)
+    twin_id = None
+    try:
+        session_res = supabase.table("interview_sessions").select("twin_id").eq("id", session_id).single().execute()
+        if session_res.data:
+            twin_id = session_res.data.get("twin_id")
+    except Exception as e:
+        print(f"Error loading interview session {session_id}: {e}")
+
+    if twin_id and extracted_memories:
+        for memory in extracted_memories:
+            try:
+                if memory.confidence < 0.6:
+                    continue
+                mapped_type = _map_interview_memory_type(memory.type)
+                topic_normalized = suggest_topic_from_value(memory.value)
+                create_owner_memory(
+                    twin_id=twin_id,
+                    tenant_id=user.get("tenant_id"),
+                    topic_normalized=topic_normalized,
+                    memory_type=mapped_type,
+                    value=memory.value,
+                    confidence=float(memory.confidence),
+                    provenance={
+                        "source_type": "interview",
+                        "source_id": session_id,
+                        "owner_id": user_id,
+                        "original_type": memory.type
+                    },
+                    status="proposed"
+                )
+            except Exception as e:
+                print(f"[Interview] Failed to propose owner memory: {e}")
     
     # Upsert memories to Zep/Graphiti
     write_count = 0

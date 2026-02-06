@@ -33,18 +33,33 @@ def mock_supabase():
 @pytest.fixture
 def mock_openai():
     """Mock OpenAI client."""
-    with patch('modules.clients.get_async_openai_client') as mock:
+    with patch('modules.clients.get_async_openai_client') as mock_async, \
+         patch('modules._core.scribe_engine.get_async_openai_client') as mock_scribe_async, \
+         patch('modules.embeddings.get_openai_client') as mock_embeddings_client, \
+         patch('modules.retrieval.get_openai_client') as mock_retrieval_client:
         client = AsyncMock()
-        mock.return_value = client
+        mock_async.return_value = client
+        mock_scribe_async.return_value = client
+
+        # Sync client for embeddings/expansion paths
+        sync_client = MagicMock()
+        sync_client.embeddings.create.return_value = MagicMock(
+            data=[MagicMock(embedding=[0.1] * 3072)]
+        )
+        mock_embeddings_client.return_value = sync_client
+        mock_retrieval_client.return_value = sync_client
+
         yield client
 
 
 @pytest.fixture
 def mock_pinecone():
     """Mock Pinecone index."""
-    with patch('modules.clients.get_pinecone_index') as mock:
+    with patch('modules.clients.get_pinecone_index') as mock_clients, \
+         patch('modules.retrieval.get_pinecone_index') as mock_retrieval:
         index = MagicMock()
-        mock.return_value = index
+        mock_clients.return_value = index
+        mock_retrieval.return_value = index
         yield index
 
 
@@ -191,12 +206,15 @@ async def test_chat_retrieval_fallback(mock_supabase, mock_openai, mock_pinecone
         data=[MagicMock(embedding=[0.1] * 3072)]
     )
     
-    # Should return contexts (not empty)
-    contexts = await retrieve_context_with_verified_first(
-        query="test query",
-        twin_id="twin-1",
-        top_k=5
-    )
+    # Stub OpenAI-dependent helpers to avoid real network calls
+    with patch('modules.retrieval.expand_query', new=AsyncMock(return_value=["test query"])), \
+         patch('modules.retrieval.generate_hyde_answer', new=AsyncMock(return_value="test query")), \
+         patch('modules.retrieval.get_embeddings_async', new=AsyncMock(return_value=[[0.1] * 3072])):
+        contexts = await retrieve_context_with_verified_first(
+            query="test query",
+            twin_id="twin-1",
+            top_k=5
+        )
     
     # Should have contexts (even if from vector fallback)
     assert len(contexts) > 0 or contexts is not None  # Adjust based on actual return type

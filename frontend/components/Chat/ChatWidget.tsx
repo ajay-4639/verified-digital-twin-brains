@@ -129,13 +129,16 @@ export default function ChatWidget({
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let done = false;
+      let buffer = '';
 
       while (!done) {
         const { value, done: readerDone } = await reader.read();
         done = readerDone;
         if (value) {
           const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split('\n');
+          buffer += chunk;
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
 
           for (const line of lines) {
             if (!line.trim()) continue;
@@ -174,6 +177,43 @@ export default function ChatWidget({
               console.error('Error parsing stream line:', e);
             }
           }
+        }
+      }
+      const tail = buffer.trim();
+      if (tail) {
+        try {
+          const data = JSON.parse(tail);
+          if (data.type === 'clarify') {
+            setLoading(false);
+            setMessages((prev) => {
+              const last = [...prev];
+              last[last.length - 1].content = `${data.question || 'Clarification needed.'} (Queued for owner confirmation.)`;
+              return last;
+            });
+          } else if (data.type === 'answer_metadata' || data.type === 'metadata') {
+            if (data.conversation_id && !conversationId) {
+              setConversationId(data.conversation_id);
+            }
+            setMessages((prev) => {
+              const last = [...prev];
+              const lastMsg = { ...last[last.length - 1] };
+              lastMsg.confidence_score = data.confidence_score;
+              lastMsg.citations = data.citations;
+              lastMsg.owner_memory_refs = data.owner_memory_refs || [];
+              last[last.length - 1] = lastMsg;
+              return last;
+            });
+          } else if (data.type === 'answer_token' || data.type === 'content') {
+            setMessages((prev) => {
+              const last = [...prev];
+              const lastMsg = { ...last[last.length - 1] };
+              lastMsg.content += data.content;
+              last[last.length - 1] = lastMsg;
+              return last;
+            });
+          }
+        } catch (e) {
+          console.error('Error parsing stream tail:', e);
         }
       }
     } catch (error) {

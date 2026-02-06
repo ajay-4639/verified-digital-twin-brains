@@ -44,7 +44,7 @@ export default function GroupConsolePage() {
     if (!inputMessage.trim() || !twinId) return;
 
     const userMessage: Message = { role: 'user', content: inputMessage };
-    setMessages([...messages, userMessage]);
+    setMessages((prev) => [...prev, userMessage, { role: 'assistant', content: '' }]);
     setInputMessage('');
     setLoading(true);
 
@@ -74,22 +74,29 @@ export default function GroupConsolePage() {
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
       let assistantMessage = '';
+      let buffer = '';
 
       if (reader) {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
-          const chunk = decoder.decode(value);
-          const lines = chunk.split('\n').filter(line => line.trim());
+          const chunk = decoder.decode(value, { stream: true });
+          buffer += chunk;
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
 
           for (const line of lines) {
+            if (!line.trim()) continue;
             try {
               const data = JSON.parse(line);
               if (data.type === 'content') {
                 assistantMessage += data.content;
-                // Update the last message in real-time
-                setMessages([...messages, userMessage, { role: 'assistant', content: assistantMessage }]);
+                setMessages((prev) => {
+                  const next = [...prev];
+                  next[next.length - 1] = { ...next[next.length - 1], content: assistantMessage };
+                  return next;
+                });
               }
             } catch (err) {
               // Skip invalid JSON
@@ -98,11 +105,30 @@ export default function GroupConsolePage() {
         }
       }
 
-      // Final message
-      setMessages([...messages, userMessage, { role: 'assistant', content: assistantMessage }]);
+      const tail = buffer.trim();
+      if (tail) {
+        try {
+          const data = JSON.parse(tail);
+          if (data.type === 'content') {
+            assistantMessage += data.content;
+          }
+        } catch (err) {
+          // Skip invalid JSON
+        }
+      }
+
+      setMessages((prev) => {
+        const next = [...prev];
+        next[next.length - 1] = { ...next[next.length - 1], content: assistantMessage || next[next.length - 1].content };
+        return next;
+      });
     } catch (err) {
       console.error('Error sending message:', err);
-      setMessages([...messages, userMessage, { role: 'assistant', content: 'Error: Failed to get response' }]);
+      setMessages((prev) => {
+        const next = [...prev];
+        next[next.length - 1] = { ...next[next.length - 1], content: 'Error: Failed to get response' };
+        return next;
+      });
     } finally {
       setLoading(false);
     }

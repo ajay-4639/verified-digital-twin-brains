@@ -129,12 +129,15 @@ export function ChatTab({ twinId, twinName, onSendMessage }: ChatTabProps) {
                 const reader = res.body.getReader();
                 const decoder = new TextDecoder();
                 let done = false;
+                let buffer = '';
                 while (!done) {
                     const { value, done: readerDone } = await reader.read();
                     done = readerDone;
                     if (value) {
                         const chunk = decoder.decode(value, { stream: true });
-                        const lines = chunk.split('\n');
+                        buffer += chunk;
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() ?? '';
                         for (const line of lines) {
                             if (!line.trim()) continue;
                             try {
@@ -165,6 +168,34 @@ export function ChatTab({ twinId, twinName, onSendMessage }: ChatTabProps) {
                                 console.error('Error parsing stream line:', e);
                             }
                         }
+                    }
+                }
+                const tail = buffer.trim();
+                if (tail) {
+                    try {
+                        const data = JSON.parse(tail);
+                        if (data.type === 'clarify') {
+                            setMessages(prev => {
+                                const next = [...prev];
+                                next[next.length - 1] = {
+                                    ...next[next.length - 1],
+                                    content: `${data.question || 'Clarification needed.'} (Answer in Training tab.)`
+                                };
+                                return next;
+                            });
+                        }
+                        if (data.type === 'answer_token' || data.type === 'content') {
+                            setMessages(prev => {
+                                const next = [...prev];
+                                next[next.length - 1] = {
+                                    ...next[next.length - 1],
+                                    content: next[next.length - 1].content + (data.content || '')
+                                };
+                                return next;
+                            });
+                        }
+                    } catch (e) {
+                        console.error('Error parsing stream tail:', e);
                     }
                 }
             }

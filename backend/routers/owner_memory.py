@@ -5,14 +5,33 @@ from modules.auth_guard import verify_owner, verify_twin_ownership
 from modules.schemas import ClarificationResolveRequest
 from modules.owner_memory_store import (
     list_owner_memories,
+    list_owner_memory_history,
     list_clarification_threads,
     get_clarification_thread,
     resolve_clarification_thread,
     create_owner_memory,
     find_owner_memory_candidates,
-    retract_owner_memory
+    retract_owner_memory,
+    get_owner_memory
 )
 from modules.memory_events import create_memory_event
+from pydantic import BaseModel, Field
+
+
+class OwnerMemoryCreateRequest(BaseModel):
+    topic_normalized: str = Field(..., description="Normalized topic label")
+    memory_type: str = Field(..., description="belief | preference | stance | lens | tone_rule")
+    value: str = Field(..., description="Owner-approved memory value")
+    stance: Optional[str] = None
+    intensity: Optional[int] = None
+
+
+class OwnerMemoryUpdateRequest(BaseModel):
+    topic_normalized: Optional[str] = None
+    memory_type: Optional[str] = None
+    value: Optional[str] = None
+    stance: Optional[str] = None
+    intensity: Optional[int] = None
 
 
 router = APIRouter(tags=["owner-memory"])
@@ -55,6 +74,150 @@ async def delete_owner_memory_endpoint(
         print(f"[OwnerMemory] audit log failed: {e}")
     
     return {"status": "retracted", "memory_id": memory_id}
+
+
+@router.get("/twins/{twin_id}/owner-memory/{memory_id}/history")
+async def get_owner_memory_history_endpoint(
+    twin_id: str,
+    memory_id: str,
+    user=Depends(verify_owner)
+):
+    verify_twin_ownership(twin_id, user)
+
+    existing = get_owner_memory(memory_id)
+    if not existing or existing.get("twin_id") != twin_id:
+        raise HTTPException(status_code=404, detail="Owner memory not found")
+
+    history = list_owner_memory_history(
+        twin_id=twin_id,
+        topic_normalized=existing.get("topic_normalized", ""),
+        memory_type=existing.get("memory_type")
+    )
+    return history
+
+
+@router.post("/twins/{twin_id}/owner-memory")
+async def create_owner_memory_endpoint(
+    twin_id: str,
+    request: OwnerMemoryCreateRequest,
+    user=Depends(verify_owner)
+):
+    verify_twin_ownership(twin_id, user)
+
+    if not request.value.strip():
+        raise HTTPException(status_code=422, detail="Value is required")
+    if not request.topic_normalized.strip():
+        raise HTTPException(status_code=422, detail="Topic is required")
+    allowed_types = {"belief", "preference", "stance", "lens", "tone_rule"}
+    if request.memory_type not in allowed_types:
+        raise HTTPException(status_code=422, detail="Invalid memory_type")
+
+    new_memory = create_owner_memory(
+        twin_id=twin_id,
+        tenant_id=user.get("tenant_id"),
+        topic_normalized=request.topic_normalized.strip(),
+        memory_type=request.memory_type,
+        value=request.value.strip(),
+        stance=request.stance,
+        intensity=request.intensity,
+        confidence=1.0,
+        provenance={
+            "source_type": "manual",
+            "owner_id": user.get("user_id")
+        },
+        supersede_id=None
+    )
+
+    if not new_memory:
+        raise HTTPException(status_code=500, detail="Failed to create owner memory")
+
+    try:
+        await create_memory_event(
+            twin_id=twin_id,
+            tenant_id=user.get("tenant_id"),
+            event_type="owner_memory_write",
+            payload={
+                "owner_memory_id": new_memory.get("id"),
+                "topic": new_memory.get("topic_normalized"),
+                "memory_type": new_memory.get("memory_type"),
+                "value": new_memory.get("value")
+            },
+            status="applied",
+            source_type="manual",
+            source_id=None
+        )
+    except Exception as e:
+        print(f"[OwnerMemory] audit log failed: {e}")
+
+    return {"status": "created", "owner_memory_id": new_memory.get("id")}
+
+
+@router.patch("/twins/{twin_id}/owner-memory/{memory_id}")
+async def update_owner_memory_endpoint(
+    twin_id: str,
+    memory_id: str,
+    request: OwnerMemoryUpdateRequest,
+    user=Depends(verify_owner)
+):
+    verify_twin_ownership(twin_id, user)
+
+    existing = get_owner_memory(memory_id)
+    if not existing or existing.get("twin_id") != twin_id:
+        raise HTTPException(status_code=404, detail="Owner memory not found")
+
+    updated_topic = (request.topic_normalized or existing.get("topic_normalized") or "").strip()
+    updated_value = (request.value or existing.get("value") or "").strip()
+    updated_type = request.memory_type or existing.get("memory_type")
+
+    if not updated_topic or not updated_value or not updated_type:
+        raise HTTPException(status_code=422, detail="Topic, type, and value are required")
+    allowed_types = {"belief", "preference", "stance", "lens", "tone_rule"}
+    if updated_type not in allowed_types:
+        raise HTTPException(status_code=422, detail="Invalid memory_type")
+
+    new_memory = create_owner_memory(
+        twin_id=twin_id,
+        tenant_id=user.get("tenant_id"),
+        topic_normalized=updated_topic,
+        memory_type=updated_type,
+        value=updated_value,
+        stance=request.stance if request.stance is not None else existing.get("stance"),
+        intensity=request.intensity if request.intensity is not None else existing.get("intensity"),
+        confidence=1.0,
+        provenance={
+            "source_type": "manual_edit",
+            "owner_id": user.get("user_id"),
+            "source_id": memory_id
+        },
+        supersede_id=memory_id
+    )
+
+    if not new_memory:
+        raise HTTPException(status_code=500, detail="Failed to update owner memory")
+
+    try:
+        await create_memory_event(
+            twin_id=twin_id,
+            tenant_id=user.get("tenant_id"),
+            event_type="owner_memory_supersede",
+            payload={
+                "owner_memory_id": new_memory.get("id"),
+                "superseded_id": memory_id,
+                "topic": updated_topic,
+                "memory_type": updated_type
+            },
+            status="applied",
+            source_type="manual",
+            source_id=None
+        )
+    except Exception as e:
+        print(f"[OwnerMemory] audit log failed: {e}")
+
+    return {
+        "status": "updated",
+        "owner_memory_id": new_memory.get("id"),
+        "superseded_id": memory_id
+    }
 
 
 @router.get("/twins/{twin_id}/clarifications")
@@ -129,7 +292,7 @@ async def resolve_clarification_endpoint(
         value=value,
         stance=stance,
         intensity=intensity,
-        confidence=0.85,
+        confidence=1.0,
         provenance={
             "clarification_id": clarification_id,
             "owner_id": user.get("user_id"),

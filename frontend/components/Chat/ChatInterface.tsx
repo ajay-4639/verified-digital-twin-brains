@@ -92,6 +92,39 @@ export default function ChatInterface({
     }
   }, []);
 
+  const rememberMemory = useCallback(async (payload: {
+    value: string;
+    topic: string;
+    memory_type: string;
+    stance?: string;
+    intensity?: number;
+  }) => {
+    const token = await getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+
+    const res = await fetch(`${apiBaseUrl}/twins/${twinId}/owner-memory`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        topic_normalized: payload.topic,
+        memory_type: payload.memory_type,
+        value: payload.value,
+        stance: payload.stance,
+        intensity: payload.intensity
+      }),
+    });
+
+    if (!res.ok) {
+      throw new Error(`Failed to save memory (${res.status})`);
+    }
+
+    onMemoryUpdated?.();
+    setMessages((prev) => [...prev, { role: 'assistant', content: 'Saved to memory.', timestamp: Date.now() }]);
+  }, [apiBaseUrl, getAuthToken, onMemoryUpdated, twinId]);
+
   useEffect(() => {
     const loadHistory = async () => {
       setLastError(null);
@@ -220,6 +253,7 @@ export default function ChatInterface({
       const decoder = new TextDecoder();
       let done = false;
       let hasReceivedBytes = false;
+      let buffer = '';
 
       while (!done) {
         const { value, done: readerDone } = await reader.read();
@@ -230,7 +264,9 @@ export default function ChatInterface({
           }
           resetWatchdog();
           const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split('\n');
+          buffer += chunk;
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
 
           for (const line of lines) {
             if (!line.trim()) continue;
@@ -316,6 +352,82 @@ export default function ChatInterface({
           }
         }
       }
+      const tail = buffer.trim();
+      if (tail) {
+        try {
+          const data = JSON.parse(tail);
+          if (data.type === 'clarify') {
+            setIsSearching(false);
+            setLoading(false);
+            setClarification(data);
+            const proposedTopic = data?.memory_write_proposal?.topic;
+            setLastDebug({
+              decision: 'CLARIFY',
+              used_owner_memory: false,
+              owner_memory_refs: [],
+              owner_memory_topics: proposedTopic ? [proposedTopic] : [],
+              clarification_id: data.clarification_id || null
+            });
+            setMessages((prev) => {
+              const last = [...prev];
+              const lastMsg = { ...last[last.length - 1] };
+              lastMsg.content = data.question || 'I need clarification.';
+              last[last.length - 1] = lastMsg;
+              return last;
+            });
+          } else if (data.type === 'answer_metadata' || data.type === 'metadata') {
+            setIsSearching(false);
+            if (data.conversation_id && !conversationId && onConversationStarted) {
+              onConversationStarted(data.conversation_id);
+            }
+            const summaries = Array.isArray(data.owner_memory_summaries)
+              ? data.owner_memory_summaries
+              : [];
+            const ownerMemoryTopics = Array.isArray(data.owner_memory_topics)
+              ? data.owner_memory_topics
+              : summaries.map((summary: any) => summary?.topic).filter(Boolean);
+            const ownerMemoryRefs = Array.isArray(data.owner_memory_refs)
+              ? data.owner_memory_refs
+              : summaries.map((summary: any) => summary?.id).filter(Boolean);
+
+            setLastDebug({
+              decision: data.dialogue_mode || 'ANSWER',
+              used_owner_memory: ownerMemoryRefs.length > 0,
+              owner_memory_refs: ownerMemoryRefs,
+              owner_memory_topics: ownerMemoryTopics,
+              clarification_id: null,
+              planning_output: data.planning_output
+            });
+
+            const graphUsed = data.graph_context?.graph_used || false;
+            setMessages((prev) => {
+              const last = [...prev];
+              const lastMsg = { ...last[last.length - 1] };
+              lastMsg.confidence_score = data.confidence_score;
+              lastMsg.citations = data.citations;
+              lastMsg.graph_used = graphUsed;
+              lastMsg.owner_memory_refs = ownerMemoryRefs;
+              lastMsg.owner_memory_topics = ownerMemoryTopics;
+              lastMsg.used_owner_memory = ownerMemoryRefs.length > 0;
+              lastMsg.teaching_questions = data.teaching_questions;
+              lastMsg.dialogue_mode = data.dialogue_mode;
+              lastMsg.planning_output = data.planning_output;
+              last[last.length - 1] = lastMsg;
+              return last;
+            });
+          } else if (data.type === 'answer_token' || data.type === 'content') {
+            setMessages((prev) => {
+              const last = [...prev];
+              const lastMsg = { ...last[last.length - 1] };
+              lastMsg.content += data.content;
+              last[last.length - 1] = lastMsg;
+              return last;
+            });
+          }
+        } catch (e) {
+          console.error('Error parsing stream tail:', e);
+        }
+      }
     } catch (error: any) {
       console.error('Error sending message:', error);
       const message = error?.name === 'AbortError'
@@ -393,7 +505,13 @@ export default function ChatInterface({
       </div>
 
       {/* Messages */}
-      <MessageList messages={messages} loading={loading} isSearching={isSearching} />
+      <MessageList
+        messages={messages}
+        loading={loading}
+        isSearching={isSearching}
+        enableRemember={mode !== 'public'}
+        onRemember={rememberMemory}
+      />
 
       {/* Input */}
       <div className="p-6 bg-white/80 backdrop-blur-sm border-t border-slate-100">

@@ -214,10 +214,15 @@ def create_owner_memory(
             "value": value,
             "stance": stance,
             "intensity": intensity,
-            "confidence": max(0.0, min(1.0, confidence)),
-            "status": "active",
+            "confidence": 1.0, # Owner verified is 1.0
+            "status": "verified", # Phase 4 Memory Tiers
             "embedding": embedding,
-            "provenance": provenance or {},
+            "provenance": {
+                "source_type": "interview",
+                "source_id": provenance.get("clarification_id") if provenance else None,
+                "owner_id": provenance.get("owner_id") if provenance else None,
+                "timestamp": datetime.utcnow().isoformat()
+            },
             "updated_at": datetime.utcnow().isoformat()
         }
         res = supabase.table("owner_beliefs").insert(insert_data).execute()

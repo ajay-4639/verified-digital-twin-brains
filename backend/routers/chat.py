@@ -177,6 +177,9 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
             citations = []
             confidence_score = 1.0
             decision_trace = None
+            teaching_questions = []
+            planning_output = {}
+            dialogue_mode = "ANSWER"
             
             # Fetch graph stats for this twin
             from modules.graph_context import get_graph_stats
@@ -338,11 +341,21 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                         confidence_score = data.get("confidence_score", confidence_score)
                         print(f"[Chat] Tools event: confidence={confidence_score}, citations={len(citations)}")
     
-                    # Capture final response from agent (only if has content, not just tool calls)
+                    # Capture final response and metadata from agent
                     if "agent" in chunk:
                         msgs = chunk["agent"]["messages"]
                         if msgs and isinstance(msgs[-1], AIMessage):
                             msg = msgs[-1]
+                            
+                            # Capture metadata for the stream (Phase 4)
+                            if hasattr(msg, "additional_kwargs"):
+                                if "teaching_questions" in msg.additional_kwargs:
+                                    teaching_questions = msg.additional_kwargs["teaching_questions"]
+                                if "planning_output" in msg.additional_kwargs:
+                                    planning_output = msg.additional_kwargs["planning_output"]
+                                if "dialogue_mode" in msg.additional_kwargs:
+                                    dialogue_mode = msg.additional_kwargs["dialogue_mode"]
+
                             # Only update if there's actual content (not just tool calls)
                             if msg.content and not getattr(msg, 'tool_calls', None):
                                 full_response = msg.content
@@ -367,7 +380,8 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
             # Determine if graph was likely used (no external citations and has graph)
             graph_used = graph_stats["has_graph"] and len(citations) == 0
             
-            # 3. Send metadata first (so frontend knows context is found)
+            
+            # 3. Send metadata first
             metadata = _normalize_json({
                 "type": "metadata",
                 "citations": citations,
@@ -376,6 +390,9 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                 "owner_memory_refs": owner_memory_refs,
                 "owner_memory_topics": owner_memory_topics,
                 "owner_memory_summaries": owner_memory_summaries,
+                "teaching_questions": teaching_questions,
+                "planning_output": planning_output,
+                "dialogue_mode": dialogue_mode,
                 "graph_context": {
                     "has_graph": graph_stats["has_graph"],
                     "node_count": graph_stats["node_count"],

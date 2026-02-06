@@ -43,11 +43,12 @@ export default function ChatInterface({
   const [clarifyOption, setClarifyOption] = useState<string | null>(null);
   const [debugOpen, setDebugOpen] = useState(false);
   const [lastDebug, setLastDebug] = useState<{
-    decision?: 'CLARIFY' | 'ANSWER' | 'UNKNOWN';
+    decision?: string;
     used_owner_memory?: boolean;
     owner_memory_refs?: string[];
     owner_memory_topics?: string[];
     clarification_id?: string | null;
+    planning_output?: any;
   }>({});
 
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -268,13 +269,16 @@ export default function ChatInterface({
                 const ownerMemoryRefs = Array.isArray(data.owner_memory_refs)
                   ? data.owner_memory_refs
                   : summaries.map((summary: any) => summary?.id).filter(Boolean);
+
                 setLastDebug({
-                  decision: 'ANSWER',
+                  decision: data.dialogue_mode || 'ANSWER',
                   used_owner_memory: ownerMemoryRefs.length > 0,
                   owner_memory_refs: ownerMemoryRefs,
                   owner_memory_topics: ownerMemoryTopics,
-                  clarification_id: null
+                  clarification_id: null,
+                  planning_output: data.planning_output
                 });
+
                 // Extract graph_used from metadata
                 const graphUsed = data.graph_context?.graph_used || false;
                 setMessages((prev) => {
@@ -286,6 +290,12 @@ export default function ChatInterface({
                   lastMsg.owner_memory_refs = ownerMemoryRefs;
                   lastMsg.owner_memory_topics = ownerMemoryTopics;
                   lastMsg.used_owner_memory = ownerMemoryRefs.length > 0;
+
+                  // Phase 4 Metadata
+                  lastMsg.teaching_questions = data.teaching_questions;
+                  lastMsg.dialogue_mode = data.dialogue_mode;
+                  lastMsg.planning_output = data.planning_output;
+
                   last[last.length - 1] = lastMsg;
                   return last;
                 });
@@ -496,6 +506,20 @@ export default function ChatInterface({
                       : 'None'}
                   </strong>
                 </div>
+                {lastDebug.planning_output && (
+                  <div className="mt-2 p-2 bg-slate-100 rounded border border-slate-200 text-[9px] font-mono text-slate-500 max-h-32 overflow-y-auto">
+                    <div className="font-bold mb-1 uppercase">Reasoning Trace:</div>
+                    {lastDebug.planning_output.reasoning_trace || 'No trace available'}
+                    {lastDebug.planning_output.answer_points && (
+                      <div className="mt-1">
+                        <div className="font-bold">Plan:</div>
+                        {Array.isArray(lastDebug.planning_output.answer_points)
+                          ? lastDebug.planning_output.answer_points.join(', ')
+                          : lastDebug.planning_output.answer_points}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>

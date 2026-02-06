@@ -1,5 +1,6 @@
 import os
 import asyncio
+import json
 from typing import Annotated, TypedDict, List, Dict, Any, Union, Optional
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
@@ -152,6 +153,7 @@ class TwinState(TypedDict):
     """
     State for the Digital Twin reasoning graph.
     Supports Path B: Global Reasoning & Agentic RAG.
+    Now supports Phase 4: Dialogue Orchestration.
     """
     messages: Annotated[List[BaseMessage], add_messages]
     twin_id: str
@@ -161,6 +163,18 @@ class TwinState(TypedDict):
     sub_queries: Optional[List[str]]
     reasoning_history: Optional[List[str]]
     retrieved_context: Optional[Dict[str, Any]] # Stores results from multiple tools
+    
+    # Phase 4: Dialogue Orchestration Metadata
+    dialogue_mode: Optional[str]        # SMALLTALK, QA_FACT, TEACHING, etc.
+    requires_evidence: bool
+    requires_teaching: bool
+    target_owner_scope: bool            # True if person-specific
+    planning_output: Optional[Dict[str, Any]] # Structured JSON from Planner Pass
+    
+    # Path B / Phase 4 Context
+    full_settings: Optional[Dict[str, Any]]
+    graph_context: Optional[str]
+    owner_memory_context: Optional[str]
 
 def create_twin_agent(
     twin_id: str,
@@ -204,40 +218,45 @@ def create_twin_agent(
     cloud_tools = get_cloud_tools(allowed_tools=allowed_tools)
     
     # Helper: Build the system prompt with persona and context
-    def build_system_prompt(state: TwinState) -> str:
-        settings = full_settings or {}
-        style_desc = settings.get("persona_profile", "Professional and helpful.")
-        phrases = settings.get("signature_phrases", [])
-        exemplars = settings.get("style_exemplars", [])
-        opinion_map = settings.get("opinion_map", {})
-        general_knowledge_allowed = settings.get("general_knowledge_allowed", False)
-        
-        # Load identity context (High-level concepts)
-        node_context = ""
-        try:
-            nodes_res = supabase.rpc("get_nodes_system", {"t_id": twin_id, "limit_val": 10}).execute()
-            if nodes_res.data:
-                profile_items = [f"- {n.get('name')}: {n.get('description')}" for n in nodes_res.data]
-                node_context = "\n            **GENERAL IDENTITY NODES:**\n            " + "\n            ".join(profile_items)
-        except Exception: pass
+def build_system_prompt(state: TwinState) -> str:
+    """
+    Analyzes owner's verified responses and opinion documents to create a persistent style profile.
+    Now supports Phase 4: Dialogue Orchestration via TwinState.
+    """
+    twin_id = state.get("twin_id", "Unknown")
+    full_settings = state.get("full_settings") or {}
+    graph_context = state.get("graph_context") or ""
+    owner_memory_context = state.get("owner_memory_context") or ""
+    
+    style_desc = full_settings.get("persona_profile", "Professional and helpful.")
+    phrases = full_settings.get("signature_phrases", [])
+    opinion_map = full_settings.get("opinion_map", {})
+    
+    # Load identity context (High-level concepts)
+    node_context = ""
+    try:
+        from modules.database import supabase
+        nodes_res = supabase.rpc("get_nodes_system", {"t_id": twin_id, "limit_val": 10}).execute()
+        if nodes_res.data:
+            profile_items = [f"- {n.get('name')}: {n.get('description')}" for n in nodes_res.data]
+            node_context = "\n            **GENERAL IDENTITY NODES:**\n            " + "\n            ".join(profile_items)
+    except Exception: pass
 
-        final_graph_context = ""
-        if graph_context:
-            final_graph_context += f"SPECIFIC KNOWLEDGE:\n{graph_context}\n\n"
-        if node_context:
-            final_graph_context += node_context
-        
-        persona_section = f"YOUR PERSONA STYLE:\n- DESCRIPTION: {style_desc}"
-        if phrases: persona_section += f"\n- SIGNATURE PHRASES: {', '.join(phrases)}"
-        if opinion_map:
-            opinions_text = "\n".join([f"- {t}: {d['stance']}" for t, d in opinion_map.items()])
-            persona_section += f"\n- CORE WORLDVIEW:\n{opinions_text}"
+    final_graph_context = ""
+    if graph_context:
+        final_graph_context += f"SPECIFIC KNOWLEDGE:\n{graph_context}\n\n"
+    if node_context:
+        final_graph_context += node_context
+    
+    persona_section = f"YOUR PERSONA STYLE:\n- DESCRIPTION: {style_desc}"
+    if phrases: persona_section += f"\n- SIGNATURE PHRASES: {', '.join(phrases)}"
+    if opinion_map:
+        opinions_text = "\n".join([f"- {t}: {d['stance']}" for t, d in opinion_map.items()])
+        persona_section += f"\n- CORE WORLDVIEW:\n{opinions_text}"
 
-        owner_memory_block = f"OWNER MEMORY:\n{owner_memory_context if owner_memory_context else '- None available.'}"
-        
-        base_identity = system_prompt_override or f"You are the AI Digital Twin of the owner (ID: {twin_id})."
-        
-        return f"""{base_identity}
+    owner_memory_block = f"OWNER MEMORY:\n{owner_memory_context if owner_memory_context else '- None available.'}"
+    
+    return f"""You are the AI Digital Twin of the owner (ID: {twin_id}).
 YOUR PRINCIPLES (Immutable):
 - Use first-person ("I", "my").
 - Every claim MUST be supported by retrieved context.
@@ -257,182 +276,281 @@ AGENTIC RAG OPERATING PROCEDURES:
 """
 
     # Define the nodes
-    async def planner_node(state: TwinState):
-        """Phase 1: Intelligent Query Decomposition (Audit 2: LLM Planner)"""
-        messages = state["messages"]
-        last_human_msg = next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), "")
+async def router_node(state: TwinState):
+    """Phase 4 Orchestrator: Intent Classification & Routing"""
+    messages = state["messages"]
+    last_human_msg = next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), "")
+    
+    router_prompt = f"""You are a Strategic Dialogue Router for a Digital Twin.
+    Classify the user's intent to determine retrieval and evidence requirements.
+    
+    USER QUERY: {last_human_msg}
+    
+    MODES:
+    - SMALLTALK: Greetings, brief pleasantries, "how are you".
+    - QA_FACT: Questions about objective facts, events, or public knowledge.
+    - QA_RELATIONSHIP: Questions about people, entities, or connections (Graph needed).
+    - STANCE_GLOBAL: Questions about beliefs, opinions, core philosophy, or "what do I think about".
+    - REPAIR: User complaining about being robotic, generic, or incorrect.
+    - TEACHING: Explicit request for the twin to learn or the twin needing more info (Fallback).
+    
+    INTENT ATTRIBUTES:
+    - is_person_specific: True if the question asks for MY (the owner's) specific view, decision, preference, or experience.
+    
+    OUTPUT FORMAT (JSON):
+    {{
+        "mode": "SMALLTALK | QA_FACT | QA_RELATIONSHIP | STANCE_GLOBAL | REPAIR | TEACHING",
+        "is_person_specific": bool,
+        "requires_evidence": bool,
+        "reasoning": "Brief explanation"
+    }}
+    """
+    
+    try:
+        router_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, model_kwargs={"response_format": {"type": "json_object"}})
+        res = await router_llm.ainvoke([SystemMessage(content=router_prompt)])
+        plan = json.loads(res.content)
+        print(f"[Router] Plan: {plan}")
         
-        planning_prompt = f"""You are a Strategic Retrieval Planner for a Digital Twin.
-        Your goal is to decompose the user's query into 1-3 targeted sub-queries for RAG retrieval.
+        mode = plan.get("mode", "QA_FACT")
+        is_specific = plan.get("is_person_specific", False)
+        req_evidence = plan.get("requires_evidence", True)
         
-        USER QUERY: {last_human_msg}
-        
-        OBJECTIVES:
-        1. If it's a 'Global' query (e.g., "What are my principles?", "Summarize everything"), generate sub-queries covering high-level concepts, personal philosophy, and recent stances.
-        2. If it's a 'Specific' query, generate refined versions of the query to maximize semantic match.
-        3. Identify if the query is asking for a CONTRADICTION check.
-        
-        OUTPUT FORMAT (JSON):
-        {{
-            "sub_queries": ["query 1", "query 2"],
-            "strategy": "global | specific | contradiction",
-            "reasoning": "Brief explanation of why these sub-queries were chosen"
-        }}
-        """
-        
-        try:
-            planner_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, model_kwargs={"response_format": {"type": "json_object"}})
-            res = await planner_llm.ainvoke([SystemMessage(content=planning_prompt)])
-            import json
-            plan = json.loads(res.content)
+        # Phase 4 Enforcement: Person-specific queries MUST have evidence verification
+        if is_specific:
+            req_evidence = True
             
-            sub_queries = plan.get("sub_queries", [last_human_msg])
-            strategy = plan.get("strategy", "specific")
-            reasoning = plan.get("reasoning", "Direct retrieval.")
+        # Sub-query generation for the next step (retrieval)
+        sub_queries = [last_human_msg] if mode != "SMALLTALK" else []
+        
+        return {
+            "dialogue_mode": mode,
+            "target_owner_scope": is_specific,
+            "requires_evidence": req_evidence,
+            "sub_queries": sub_queries,
+            "reasoning_history": (state.get("reasoning_history") or []) + [f"Router: Mode={mode}, Specific={is_specific}"]
+        }
+    except Exception as e:
+        print(f"Router error: {e}")
+        return {"dialogue_mode": "QA_FACT", "requires_evidence": True, "sub_queries": [last_human_msg]}
+
+async def evidence_gate_node(state: TwinState):
+    """Phase 4: Evidence Gate (Hard Constraint with LLM Verifier)"""
+    mode = state.get("dialogue_mode")
+    is_specific = state.get("target_owner_scope", False)
+    context = state.get("retrieved_context", {}).get("results", [])
+    last_human_msg = next((m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), "")
+    
+    # Hard Gate Logic
+    requires_teaching = False
+    reason = "Sufficient evidence found."
+    
+    if is_specific:
+        if not context:
+            requires_teaching = True
+            reason = "No evidence found for person-specific query."
+        else:
+            # LLM Verifier Pass for person-specific intents
+            context_str = "\n".join([f"- {c.get('text')}" for c in context[:3]])
+            verifier_prompt = f"""You are an Evidence Verifier for a Digital Twin.
+            The user asked a person-specific question, and we retrieved some context.
+            Determine if the context contains SUFFICIENT EVIDENCE to answer the question as the twin.
             
-            return {
-                "sub_queries": sub_queries, 
-                "reasoning_history": (state.get("reasoning_history") or []) + [f"Planning ({strategy}): {reasoning}"]
-            }
-        except Exception as e:
-            print(f"Planning error: {e}")
-            return {"sub_queries": [last_human_msg], "reasoning_history": ["Planning fallback: Direct retrieval."]}
+            USER QUESTION: {last_human_msg}
+            RETRIEVED CONTEXT:
+            {context_str}
+            
+            RULE: If the context is generic, irrelevant, or doesn't actually contain the owner's stance/recipe/decision, you MUST fail it.
+            
+            OUTPUT FORMAT (JSON):
+            {{
+                "is_sufficient": bool,
+                "reason": "Brief explanation"
+            }}
+            """
+            try:
+                verifier_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, model_kwargs={"response_format": {"type": "json_object"}})
+                res = await verifier_llm.ainvoke([SystemMessage(content=verifier_prompt)])
+                v_res = json.loads(res.content)
+                
+                if not v_res.get("is_sufficient"):
+                    requires_teaching = True
+                    reason = f"Verifier: {v_res.get('reason')}"
+            except Exception as e:
+                print(f"Verifier error: {e}")
+                # Fallback to simple context check
+                if len(context) < 1:
+                    requires_teaching = True
+                    reason = "Fallback: Insufficient context length."
+
+    new_mode = "TEACHING" if requires_teaching else mode
+    
+    return {
+        "dialogue_mode": new_mode,
+        "requires_teaching": requires_teaching,
+        "reasoning_history": (state.get("reasoning_history") or []) + [f"Gate: {'FAIL -> TEACHING' if requires_teaching else 'PASS'}. {reason}"]
+    }
+
+async def planner_node(state: TwinState):
+    """Pass A: Strategic Planning & Logic (Structured JSON)"""
+    mode = state.get("dialogue_mode", "QA_FACT")
+    context_data = state.get("retrieved_context", {}).get("results", [])
+    
+    # Use the dynamic system prompt (Phase 4)
+    system_msg = build_system_prompt(state)
+    
+    # Prepare context
+    context_str = ""
+    for i, res in enumerate(context_data):
+        text = res.get("text", "")
+        date_info = res.get("metadata", {}).get("effective_from", "Unknown Date")
+        source = res.get("source_id", "Unknown")
+        context_str += f"[{i}] (Date: {date_info} | ID: {source}): {text}\n"
+
+    planner_prompt = f"""
+{system_msg}
+
+CURRENT MODE: {mode}
+EVIDENCE:
+{context_str if context_str else "No evidence retrieved."}
+
+TASK:
+1. Identify the core points for the user's answer (max 3).
+2. If in TEACHING mode, generate 2-3 specific questions for the owner.
+3. Select a follow-up question to keep the conversation going.
+4. If evidence is present, map points to citations.
+
+OUTPUT FORMAT (STRICT JSON):
+{{
+    "answer_points": ["point 1", "point 2"],
+    "citations": ["Source_ID_1", "Source_ID_2"],
+    "follow_up_question": "...",
+    "confidence": 0.0-1.0,
+    "teaching_questions": ["q1", "q2"],
+    "reasoning_trace": "Short internal log"
+}}
+"""
+    try:
+        planner_llm = ChatOpenAI(model="gpt-4o", temperature=0, model_kwargs={"response_format": {"type": "json_object"}})
+        res = await planner_llm.ainvoke([SystemMessage(content=planner_prompt)])
+        plan = json.loads(res.content)
+        
+        return {
+            "planning_output": plan,
+            "reasoning_history": (state.get("reasoning_history") or []) + [f"Planner: Generated {len(plan.get('answer_points', []))} points."]
+        }
+    except Exception as e:
+        print(f"Planner error: {e}")
+        return {"planning_output": {"answer_points": ["I encountered an error planning my response."], "follow_up_question": "Can you try rephrasing?"}}
+
+async def realizer_node(state: TwinState):
+    """Pass B: Conversational Reification (Human-like Output)"""
+    plan = state.get("planning_output", {})
+    mode = state.get("dialogue_mode", "QA_FACT")
+    llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
+    
+    realizer_prompt = f"""You are the Voice Realizer for a Digital Twin. 
+    Take the structured plan and rewrite it into a short, natural, conversational response.
+    
+    PLAN:
+    {json.dumps(plan, indent=2)}
+    
+    CONSTRAINTS:
+    - 1 to 3 sentences total.
+    - Sound like a real person, not a bot.
+    - Include the follow-up question at the end.
+    - If teaching: explain briefly that you need their input to be certain.
+    - NO FAKE SOURCES. Use citations provided in the plan if any.
+    """
+    
+    try:
+        res = await llm.ainvoke([SystemMessage(content=realizer_prompt)])
+        
+        # Post-process for citations and teaching metadata (Phase 4)
+        citations = plan.get("citations", [])
+        teaching_questions = plan.get("teaching_questions", [])
+        
+        # Enrich message with metadata for the UI
+        res.additional_kwargs["teaching_questions"] = teaching_questions
+        res.additional_kwargs["planning_output"] = plan
+        res.additional_kwargs["dialogue_mode"] = mode
+        
+        return {
+            "messages": [res],
+            "citations": citations,
+            "reasoning_history": (state.get("reasoning_history") or []) + ["Realizer: Response reified with Metadata."]
+        }
+    except Exception as e:
+        print(f"Realizer error: {e}")
+        from langchain_core.messages import AIMessage
+        return {"messages": [AIMessage(content="I'm having trouble finding the words right now.")]}
+
+def create_twin_agent(
+    twin_id: str,
+    group_id: Optional[str] = None,
+    system_prompt_override: str = None,
+    full_settings: dict = None,
+    graph_context: str = "",
+    owner_memory_context: str = ""
+):
+    # Retrieve-only tool setup needs to stay inside or be passed
+    from modules.tools import get_retrieval_tool
+    retrieval_tool = get_retrieval_tool(twin_id, group_id=group_id)
 
     async def retrieve_hybrid_node(state: TwinState):
         """Phase 2: Executing planned retrieval (Audit 1: Parallel & Robust)"""
         sub_queries = state.get("sub_queries", [])
-        twin_id = state["twin_id"]
         messages = state["messages"]
-        
         all_results = []
         citations = []
-        total_score = 0
-        score_count = 0
         
-        # Create retrieval tool
-        retrieval_tool = get_retrieval_tool(twin_id, group_id=group_id, conversation_history=messages)
-        
-        # Parallel execution of sub-queries (Performance Improvement)
         async def safe_retrieve(query):
             try:
                 res_str = await retrieval_tool.ainvoke({"query": query})
-                import json
                 return json.loads(res_str)
             except Exception as e:
-                print(f"Retrieval sub-query error ({query}): {e}")
+                print(f"Retrieval error: {e}")
                 return []
 
         tasks = [safe_retrieve(q) for q in sub_queries]
         results_list = await asyncio.gather(*tasks)
-        
         for res_data in results_list:
             if isinstance(res_data, list):
                 for item in res_data:
                     all_results.append(item)
                     if "source_id" in item:
                         citations.append(item["source_id"])
-                    if "score" in item:
-                        total_score += item.get("score", 0.7)
-                        score_count += 1
-
-        new_confidence = total_score / score_count if score_count > 0 else 0.0
-        
-        # Check for verified matches
-        has_verified = any(
-            item.get("is_verified") or item.get("verified_qna_match") 
-            for item in all_results if isinstance(item, dict)
-        )
-        if has_verified: 
-            new_confidence = 1.0
 
         return {
             "retrieved_context": {"results": all_results},
             "citations": list(set(citations)),
-            "confidence_score": new_confidence,
-            "reasoning_history": (state.get("reasoning_history") or []) + [f"Retrieval: Executed {len(sub_queries)} parallel sub-queries."]
+            "reasoning_history": (state.get("reasoning_history") or []) + [f"Retrieval: Executed {len(sub_queries)} queries."]
         }
-
-    async def synthesize_node(state: TwinState):
-        """Phase 3: Final Answer Construction (Audit 3: Stance Compiler & Path C)"""
-        messages = state["messages"]
-        context_data = state.get("retrieved_context", {}).get("results", [])
-        settings = full_settings or {}
-        opinion_map = settings.get("opinion_map", {})
-        
-        # Prepare context for the prompt
-        context_str = ""
-        for i, res in enumerate(context_data):
-            text = res.get("text", "")
-            # Temporal Marker (Path C Preparation)
-            date_info = res.get("metadata", {}).get("effective_from", "Unknown Date")
-            source = res.get("source_id", "Unknown")
-            context_str += f"[{i}] (Date: {date_info} | ID: {source}): {text}\n"
-        
-        # Build the structured system prompt
-        system_msg = build_system_prompt(state)
-        
-        # Stance Compiler: Inject core worldviews into the synthesis instruction
-        opinions_context = "\n".join([f"- {topic}: {data['stance']}" for topic, data in opinion_map.items()]) if opinion_map else "No specific opinions recorded."
-
-        synthesis_instruction = f"""
-{system_msg}
-
-### CORE WORLDVIEW (Authoritative Stance):
-{opinions_context}
-
-### RETRIEVED KNOWLEDGE (Chronological/Relevance Ordered):
-{context_str}
-
-### PATH B GLOBAL REASONING & PATH C TEMPORAL INSTRUCTIONS:
-1. **Consistency Check**: Do the retrieved facts align with my CORE WORLDVIEW? If the knowledge contradicts my core beliefs, prioritize my belief but mention the conflicting data as a potential "point of growth" or "outside perspective".
-2. **Temporal Evolution**: Look at the dates in [brackets]. If my stance has changed over time, explain the EVOLUTION. (Path C Reasoning).
-3. **Citation Integrity**: Every sentence must point to [Source ID] or [bracket index].
-4. **Final Synthesis**: Provide a unified, first-person response that sounds like ME.
-"""
-
-        # Context Management: Keep the system prompt and the last 5 human-ai turns
-        managed_messages = [SystemMessage(content=synthesis_instruction)]
-        if len(messages) > 1:
-            managed_messages.extend(messages[1:][-10:]) # Keep last 10 messages for context
-            
-        try:
-            response = await llm.ainvoke(managed_messages)
-            
-            # Post-processing: Check for citation density (Higher quality check)
-            has_citations = "[" in response.content or "Source" in response.content
-            
-            return {
-                "messages": [response],
-                "reasoning_history": (state.get("reasoning_history") or []) + [
-                    f"Synthesis: Integrated {len(context_data)} sources with Persona Opinions. Citations: {'Present' if has_citations else 'Low'}."
-                ]
-            }
-        except Exception as e:
-            print(f"Synthesis error: {e}")
-            return {"messages": [HumanMessage(content="I apologize, I encountered a reasoning error while synthesizing my knowledge.")]}
 
     # Define the graph
     workflow = StateGraph(TwinState)
     
-    # Add nodes
-    workflow.add_node("planner", planner_node)
+    workflow.add_node("router", router_node)
     workflow.add_node("retrieve", retrieve_hybrid_node)
-    workflow.add_node("synthesize", synthesize_node)
+    workflow.add_node("gate", evidence_gate_node)
+    workflow.add_node("planner", planner_node)
+    workflow.add_node("realizer", realizer_node)
     
-    # Set entry point
-    workflow.set_entry_point("planner")
+    workflow.set_entry_point("router")
     
-    # Define linear execution for now (can add loops/branches later for complex multi-hop)
-    workflow.add_edge("planner", "retrieve")
-    workflow.add_edge("retrieve", "synthesize")
-    workflow.add_edge("synthesize", END)
+    def route_after_router(state: TwinState):
+        if state.get("requires_evidence"):
+            return "retrieve"
+        return "planner"
+
+    workflow.add_conditional_edges("router", route_after_router, {"retrieve": "retrieve", "planner": "planner"})
+    workflow.add_edge("retrieve", "gate")
+    workflow.add_edge("gate", "planner")
+    workflow.add_edge("planner", "realizer")
+    workflow.add_edge("realizer", END)
     
-    # P1-A: Compile with checkpointer if available
     checkpointer = get_checkpointer()
-    if checkpointer:
-        return workflow.compile(checkpointer=checkpointer)
-    else:
-        return workflow.compile()
+    return workflow.compile(checkpointer=checkpointer) if checkpointer else workflow.compile()
 
 # Langfuse v3 tracing
 try:
@@ -538,7 +656,17 @@ async def run_agent_stream(
         "citations": [],
         "sub_queries": [],
         "reasoning_history": [],
-        "retrieved_context": {}
+        "retrieved_context": {},
+        # Phase 4 initialization
+        "dialogue_mode": "QA_FACT",
+        "requires_evidence": True,
+        "requires_teaching": False,
+        "target_owner_scope": False,
+        "planning_output": None,
+        # Path B / Phase 4 Context
+        "full_settings": settings,
+        "graph_context": graph_context,
+        "owner_memory_context": owner_memory_context
     }
     
     # Phase 10: Metrics instrumentation

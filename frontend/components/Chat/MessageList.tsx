@@ -13,6 +13,9 @@ export interface Message {
   owner_memory_refs?: string[];
   used_owner_memory?: boolean;
   owner_memory_topics?: string[];
+  teaching_questions?: string[];
+  dialogue_mode?: string;
+  planning_output?: any;
   timestamp?: number; // Unix timestamp in milliseconds
 }
 
@@ -183,6 +186,35 @@ const MessageList = React.memo(({ messages, loading, isSearching }: MessageListP
                   </div>
                 )}
               </div>
+
+              {/* Teaching Cards (Phase 4) */}
+              {msg.role === 'assistant' && msg.teaching_questions && msg.teaching_questions.length > 0 && (
+                <div className="mt-3 space-y-2 max-w-sm animate-in slide-in-from-left-2 duration-300">
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="w-1.5 h-1.5 bg-yellow-400 rounded-full animate-pulse"></div>
+                    <span className="text-[10px] uppercase font-black tracking-widest text-slate-400">Knowledge Gap Detected</span>
+                  </div>
+                  {msg.teaching_questions.map((q, qIdx) => (
+                    <div key={qIdx} className="bg-white border-2 border-yellow-100 p-4 rounded-2xl shadow-sm hover:border-yellow-200 transition-colors group/card">
+                      <p className="text-xs font-semibold text-slate-700 mb-3 leading-relaxed">{q}</p>
+                      <button
+                        onClick={() => {
+                          // TODO: This should ideally trigger the same resolve_clarification flow
+                          // For now, we just copy to input via a custom event or window message
+                          const input = document.querySelector('textarea');
+                          if (input) {
+                            input.value = `Regarding: "${q}"... `;
+                            input.focus();
+                          }
+                        }}
+                        className="w-full py-2 bg-yellow-50 hover:bg-yellow-100 text-yellow-700 text-[10px] font-bold uppercase tracking-wider rounded-xl transition-colors border border-yellow-100"
+                      >
+                        Help me learn this
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {/* Timestamp and metadata row */}
               <div className="flex items-center gap-2 px-1">

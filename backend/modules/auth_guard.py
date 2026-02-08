@@ -26,6 +26,11 @@ if not SUPABASE_JWT_SECRET or len(SUPABASE_JWT_SECRET) < 32:
     print("=" * 60, file=sys.stderr)
 
 
+def _is_deleted_email(email: str) -> bool:
+    email = (email or "").lower().strip()
+    return email.startswith("deleted_") or email.endswith("@deleted.local")
+
+
 def resolve_tenant_id(user_id: str, email: str = None, create_if_missing: bool = True) -> str:
     """
     Resolve tenant_id for a user, auto-creating tenant if needed.
@@ -80,10 +85,50 @@ def resolve_tenant_id(user_id: str, email: str = None, create_if_missing: bool =
     except Exception as e:
         print(f"[resolve_tenant_id] Owner-tenant recovery skipped: {e}")
 
+    # 3. Recovery: if this email already maps to an active tenant, re-link by email.
+    # This prevents tenant drift when auth user IDs rotate for the same owner email.
+    normalized_email = (email or "").strip().lower()
+    if normalized_email and not _is_deleted_email(normalized_email):
+        try:
+            email_matches = (
+                supabase_client.table("users")
+                .select("id, email, tenant_id, last_active_at, created_at")
+                .eq("email", normalized_email)
+                .execute()
+            )
+            candidates = []
+            for row in email_matches.data or []:
+                candidate_tenant_id = row.get("tenant_id")
+                candidate_email = row.get("email")
+                if not candidate_tenant_id:
+                    continue
+                if _is_deleted_email(candidate_email):
+                    continue
+                candidates.append(row)
+
+            if candidates:
+                # Prefer the most recently active user mapping.
+                candidates.sort(
+                    key=lambda r: ((r.get("last_active_at") or ""), (r.get("created_at") or "")),
+                    reverse=True,
+                )
+                winner = candidates[0]
+                tenant_id = winner["tenant_id"]
+
+                user_data = {"id": user_id, "tenant_id": tenant_id, "email": normalized_email}
+                supabase_client.table("users").upsert(user_data).execute()
+                print(
+                    "[resolve_tenant_id] Re-linked user "
+                    f"{user_id} to tenant {tenant_id} via email {normalized_email}"
+                )
+                return tenant_id
+        except Exception as e:
+            print(f"[resolve_tenant_id] Email-tenant recovery skipped: {e}")
+
     if not create_if_missing:
         raise HTTPException(status_code=404, detail="Tenant not found for user")
 
-    # 3. Create tenant only when explicitly allowed.
+    # 4. Create tenant only when explicitly allowed.
     print(f"[resolve_tenant_id] No tenant for user {user_id}, creating tenant...")
     
     try:

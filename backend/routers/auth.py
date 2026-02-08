@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 from modules.auth_guard import verify_owner, get_current_user, resolve_tenant_id, ensure_twin_active
 from modules.schemas import (
     ApiKeyCreateRequest, ApiKeyUpdateRequest, UserInvitationCreateRequest,
@@ -45,7 +45,7 @@ async def sync_user(request: Request, response: Response, user=Depends(get_curre
 
     print(f"[SYNC {correlation_id}] Starting sync for user_id: {user.get('user_id')}")
     user_id = user.get("user_id")
-    email = user.get("email", "")
+    email = (user.get("email", "") or "").strip().lower()
     print(f"[SYNC {correlation_id}] email: {email}")
     
     # Check if user already exists in our users table
@@ -60,31 +60,19 @@ async def sync_user(request: Request, response: Response, user=Depends(get_curre
         user_data = existing.data[0]
         tenant_id = user_data.get("tenant_id")
         
-        # ENTERPRISE FIX: Auto-create tenant if missing
+        # Recover tenant mapping if missing.
         if not tenant_id:
-            print(f"[SYNC {correlation_id}] User exists but has no tenant_id, auto-creating...")
-            full_name = user.get("name") or user.get("user_metadata", {}).get("full_name") or email.split("@")[0]
-            
+            print(f"[SYNC {correlation_id}] User exists but has no tenant_id, recovering...")
             try:
-                tenant_insert = supabase.table("tenants").insert({
-                    "name": f"{full_name}'s Workspace"
+                tenant_id = resolve_tenant_id(user_id, email, create_if_missing=True)
+                supabase.table("users").upsert({
+                    "id": user_id,
+                    "email": email,
+                    "tenant_id": tenant_id
                 }).execute()
-                if getattr(tenant_insert, "error", None):
-                    print(f"[SYNC {correlation_id}] ERROR tenant insert: {tenant_insert.error}")
-                    raise HTTPException(status_code=503, detail="Tenant creation unavailable")
-
-                tenant_id = tenant_insert.data[0]["id"] if tenant_insert.data else None
-                print(f"[SYNC {correlation_id}] Created tenant {tenant_id} for existing user")
-                
-                # Update user with new tenant_id
-                if tenant_id:
-                    supabase.table("users").update({
-                        "tenant_id": tenant_id
-                    }).eq("id", user_id).execute()
-                    print(f"[SYNC {correlation_id}] Updated user with tenant_id")
+                print(f"[SYNC {correlation_id}] Recovered tenant {tenant_id} for existing user")
             except Exception as e:
-                print(f"[SYNC {correlation_id}] ERROR auto-creating tenant: {e}")
-                # Continue without tenant - will fail on operations but at least auth works
+                print(f"[SYNC {correlation_id}] ERROR recovering tenant: {e}")
         
         # Check if they have any twins (onboarding complete if yes)
         if tenant_id:
@@ -114,47 +102,34 @@ async def sync_user(request: Request, response: Response, user=Depends(get_curre
     avatar_url = user.get("avatar_url") or user.get("user_metadata", {}).get("avatar_url")
     print(f"[SYNC {correlation_id}] full_name: {full_name}, avatar_url: {avatar_url}")
     
-    # IMPORTANT: Create tenant FIRST, then user with tenant_id
-    # This fixes the OAuth signup error where tenant_id was required but didn't exist yet
-    print(f"[SYNC {correlation_id}] Creating tenant first...")
+    # Resolve tenant via canonical resolver.
+    print(f"[SYNC {correlation_id}] Resolving tenant via canonical resolver...")
     try:
-        tenant_insert = supabase.table("tenants").insert({
-            "owner_id": user_id,
-            "name": f"{full_name}'s Workspace"
-        }).execute()
-        if getattr(tenant_insert, "error", None):
-            print(f"[SYNC {correlation_id}] ERROR tenant insert: {tenant_insert.error}")
-            raise HTTPException(status_code=503, detail="Tenant creation unavailable")
+        tenant_id = resolve_tenant_id(user_id, email, create_if_missing=True)
+        print(f"[SYNC {correlation_id}] Tenant resolved with id: {tenant_id}")
     except Exception as e:
-        print(f"[SYNC {correlation_id}] ERROR creating tenant: {e}")
+        print(f"[SYNC {correlation_id}] ERROR resolving tenant: {e}")
         raise
-    
-    tenant_id = tenant_insert.data[0]["id"] if tenant_insert.data else None
-    print(f"[SYNC {correlation_id}] Tenant created with id: {tenant_id}")
-    
-    # Now create user record with tenant_id
-    print(f"[SYNC {correlation_id}] Inserting into users table with tenant_id...")
+
+    # Ensure user record exists with the resolved tenant_id.
+    print(f"[SYNC {correlation_id}] Upserting user row with tenant_id...")
     try:
-        user_insert = supabase.table("users").insert({
+        user_insert = supabase.table("users").upsert({
             "id": user_id,
             "email": email,
             "tenant_id": tenant_id
         }).execute()
         if getattr(user_insert, "error", None):
-            print(f"[SYNC {correlation_id}] ERROR user insert: {user_insert.error}")
+            print(f"[SYNC {correlation_id}] ERROR user upsert: {user_insert.error}")
             raise HTTPException(status_code=503, detail="User creation unavailable")
         print(f"[SYNC {correlation_id}] User created successfully with tenant_id")
     except Exception as e:
         print(f"[SYNC {correlation_id}] ERROR creating user: {e}")
-        # If user creation fails, try to clean up the tenant
-        if tenant_id:
-            try:
-                supabase.table("tenants").delete().eq("id", tenant_id).execute()
-                print(f"[SYNC {correlation_id}] Cleaned up tenant after user creation failure")
-            except:
-                pass
         raise
     
+    twins_check = supabase.table("twins").select("id").eq("tenant_id", tenant_id).limit(1).execute()
+    has_twins = bool(twins_check.data)
+
     return SyncUserResponse(
         status="created",
         user=UserProfile(
@@ -163,10 +138,10 @@ async def sync_user(request: Request, response: Response, user=Depends(get_curre
             full_name=full_name,
             avatar_url=avatar_url,
             tenant_id=tenant_id,
-            onboarding_completed=False,
-            created_at=datetime.utcnow().isoformat()
+            onboarding_completed=has_twins,
+            created_at=datetime.now(timezone.utc).isoformat()
         ),
-        needs_onboarding=True
+        needs_onboarding=not has_twins
     )
 
 

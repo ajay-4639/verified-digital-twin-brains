@@ -5,6 +5,7 @@ import { useRealtimeInterview, TranscriptTurn } from '@/lib/hooks/useRealtimeInt
 import { InterviewControls, TranscriptPanel } from '@/components/interview';
 
 interface InterviewViewProps {
+    twinId: string;
     onComplete?: () => void;
     onDataAvailable?: (data: any) => void;
 }
@@ -14,7 +15,7 @@ interface InterviewViewProps {
  * 
  * Reusable component for real-time voice interview.
  */
-export function InterviewView({ onComplete, onDataAvailable }: InterviewViewProps) {
+export function InterviewView({ twinId, onComplete, onDataAvailable }: InterviewViewProps) {
     const {
         isConnected,
         isRecording,
@@ -25,6 +26,7 @@ export function InterviewView({ onComplete, onDataAvailable }: InterviewViewProp
         stopInterview,
         clearTranscript,
     } = useRealtimeInterview({
+        twinId,
         onTranscriptUpdate: (updated) => {
             console.log('Transcript updated:', updated.length, 'turns');
         },

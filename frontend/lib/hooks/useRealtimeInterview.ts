@@ -19,6 +19,7 @@ interface RealtimeInterviewState {
 }
 
 interface UseRealtimeInterviewOptions {
+    twinId?: string;
     onTranscriptUpdate?: (transcript: TranscriptTurn[]) => void;
     onConnectionChange?: (connected: boolean) => void;
     onError?: (error: string) => void;
@@ -63,21 +64,23 @@ export function useRealtimeInterview(options: UseRealtimeInterviewOptions = {}) 
      * Create interview session and get context bundle
      */
     const createInterviewSession = useCallback(async (accessToken: string) => {
+        const payload = options.twinId ? { twin_id: options.twinId } : {};
         const response = await fetch(`${API_BASE_URL}/api/interview/sessions`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${accessToken}`,
             },
-            body: JSON.stringify({}),
+            body: JSON.stringify(payload),
         });
 
         if (!response.ok) {
-            throw new Error('Failed to create interview session');
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.detail || 'Failed to create interview session');
         }
 
         return response.json();
-    }, []);
+    }, [options.twinId]);
 
     /**
      * Get ephemeral Realtime session credentials from backend
@@ -327,8 +330,8 @@ export function useRealtimeInterview(options: UseRealtimeInterviewOptions = {}) 
 
         let result = null;
 
-        // Finalize session with backend
-        if (interviewSessionIdRef.current && state.transcript.length > 0) {
+        // Finalize session with backend (even if transcript is empty, close the session cleanly)
+        if (interviewSessionIdRef.current) {
             try {
                 const accessToken = await getAccessToken();
 

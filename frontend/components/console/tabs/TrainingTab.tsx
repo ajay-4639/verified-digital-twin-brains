@@ -540,6 +540,7 @@ export function TrainingTab({ twinId }: { twinId: string }) {
                             </button>
                         </div>
                         <InterviewView
+                            twinId={twinId}
                             onComplete={() => {
                                 setCurrentStep('knowledge');
                                 scrollToSection('training-knowledge');

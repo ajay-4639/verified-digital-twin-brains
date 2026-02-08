@@ -17,7 +17,12 @@ import httpx
 
 from modules.auth_guard import get_current_user
 from modules.observability import supabase
-from modules.owner_memory_store import create_owner_memory, suggest_topic_from_value
+from modules.owner_memory_store import (
+    create_owner_memory,
+    suggest_topic_from_value,
+    list_owner_memories,
+    format_owner_memory_context,
+)
 
 router = APIRouter(prefix="/api/interview", tags=["interview"])
 
@@ -28,7 +33,7 @@ router = APIRouter(prefix="/api/interview", tags=["interview"])
 
 class CreateSessionRequest(BaseModel):
     """Request to create a new interview session."""
-    twin_id: Optional[str] = None  # Optional, will use user's default twin if not provided
+    twin_id: Optional[str] = None  # Optional only when tenant has exactly one twin
 
 
 class CreateSessionResponse(BaseModel):
@@ -80,6 +85,7 @@ class RealtimeSessionRequest(BaseModel):
     model: str = "gpt-4o-realtime-preview-2024-12-17"
     voice: str = "alloy"
     system_prompt: Optional[str] = None
+    twin_id: Optional[str] = None
 
 
 class RealtimeSessionResponse(BaseModel):
@@ -175,7 +181,7 @@ def _map_interview_memory_type(mem_type: str) -> str:
     return "belief"
 
 
-async def _get_user_context(user_id: str, task: str = "interview") -> str:
+async def _get_user_context(user_id: str, task: str = "interview", twin_id: Optional[str] = None) -> str:
     """
     Retrieve prioritized context bundle for the user from Zep/Graphiti.
     
@@ -195,11 +201,37 @@ async def _get_user_context(user_id: str, task: str = "interview") -> str:
         if context:
             print(f"[Interview] Retrieved {len(context)} chars of context for user {user_id}")
         
-        return context
+        if context:
+            return context
         
     except Exception as e:
         print(f"Error fetching user context from Zep: {e}")
-        return ""
+
+    # Fallback when graph memory is unavailable: use owner memory rows for this twin.
+    if twin_id:
+        try:
+            active_memories = list_owner_memories(twin_id, status="active", limit=20)
+            proposed_memories = list_owner_memories(twin_id, status="proposed", limit=20)
+
+            sections: List[str] = []
+            if active_memories:
+                sections.append("**Approved owner memories:**")
+                sections.append(format_owner_memory_context(active_memories, max_items=8))
+            if proposed_memories:
+                sections.append("**Pending owner memory proposals:**")
+                sections.append(format_owner_memory_context(proposed_memories, max_items=6))
+
+            fallback_context = "\n".join([s for s in sections if s]).strip()
+            if fallback_context:
+                print(
+                    f"[Interview] Using owner memory fallback context "
+                    f"({len(active_memories)} approved, {len(proposed_memories)} proposed) for twin {twin_id}"
+                )
+                return fallback_context
+        except Exception as e:
+            print(f"Error building owner-memory fallback context: {e}")
+
+    return ""
 
 
 async def _create_ephemeral_realtime_session(
@@ -303,17 +335,41 @@ async def create_interview_session(
     
     # Get or determine twin_id
     twin_id = request.twin_id
-    if not twin_id:
-        # Get user's default twin
-        twins_resp = supabase.table("twins").select("id").eq(
-            "tenant_id", tenant_id
-        ).limit(1).execute()
-        
-        if twins_resp.data:
-            twin_id = twins_resp.data[0]["id"]
+    if twin_id:
+        # Verify provided twin belongs to this tenant.
+        twin_res = (
+            supabase.table("twins")
+            .select("id")
+            .eq("id", twin_id)
+            .eq("tenant_id", tenant_id)
+            .single()
+            .execute()
+        )
+        if not twin_res.data:
+            raise HTTPException(status_code=404, detail="Twin not found")
+    else:
+        # Safe fallback only if tenant has exactly one twin.
+        twins_resp = (
+            supabase.table("twins")
+            .select("id")
+            .eq("tenant_id", tenant_id)
+            .order("created_at", desc=True)
+            .limit(2)
+            .execute()
+        )
+        twin_rows = twins_resp.data or []
+        if len(twin_rows) == 1:
+            twin_id = twin_rows[0]["id"]
+        elif len(twin_rows) == 0:
+            raise HTTPException(status_code=404, detail="No twin found for this account")
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail="Multiple twins found. Select a twin explicitly before starting interview mode."
+            )
     
     # Get context from prior sessions
-    context_bundle = await _get_user_context(user_id, "interview")
+    context_bundle = await _get_user_context(user_id, "interview", twin_id=twin_id)
 
     # Load intent profile + public intro from twin settings if available
     intent_profile = {}
@@ -376,6 +432,27 @@ async def finalize_interview_session(
     if not user_id:
         raise HTTPException(status_code=401, detail="User not authenticated")
     
+    # Load and validate session ownership first.
+    session_row = None
+    try:
+        session_res = (
+            supabase.table("interview_sessions")
+            .select("id, twin_id, user_id, status")
+            .eq("id", session_id)
+            .single()
+            .execute()
+        )
+        session_row = session_res.data
+    except Exception as e:
+        print(f"Error loading interview session {session_id}: {e}")
+
+    if not session_row:
+        raise HTTPException(status_code=404, detail="Interview session not found")
+    if session_row.get("user_id") and session_row.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized for this interview session")
+    if session_row.get("status") == "completed":
+        raise HTTPException(status_code=409, detail="Interview session already finalized")
+
     # Extract memories from transcript
     extracted_memories = await _extract_memories_from_transcript(
         request.transcript,
@@ -383,17 +460,11 @@ async def finalize_interview_session(
     )
 
     # Store extracted memories as proposed owner memories (for approval)
-    twin_id = None
+    twin_id = session_row.get("twin_id")
     proposed_count = 0
     proposed_failed_count = 0
     low_confidence_skipped = 0
     notes: List[str] = []
-    try:
-        session_res = supabase.table("interview_sessions").select("twin_id").eq("id", session_id).single().execute()
-        if session_res.data:
-            twin_id = session_res.data.get("twin_id")
-    except Exception as e:
-        print(f"Error loading interview session {session_id}: {e}")
 
     if twin_id and extracted_memories:
         for memory in extracted_memories:
@@ -503,14 +574,28 @@ async def create_realtime_session(
     NEVER sees the actual OpenAI API key.
     """
     user_id = user.get("user_id")
+    tenant_id = user.get("tenant_id")
     
     if not user_id:
         raise HTTPException(status_code=401, detail="User not authenticated")
     
+    # Validate optional twin scope for context binding.
+    if request.twin_id:
+        twin_res = (
+            supabase.table("twins")
+            .select("id")
+            .eq("id", request.twin_id)
+            .eq("tenant_id", tenant_id)
+            .single()
+            .execute()
+        )
+        if not twin_res.data:
+            raise HTTPException(status_code=404, detail="Twin not found")
+
     # Get user context if no system prompt provided
     system_prompt = request.system_prompt
     if not system_prompt:
-        context_bundle = await _get_user_context(user_id, "interview")
+        context_bundle = await _get_user_context(user_id, "interview", twin_id=request.twin_id)
         system_prompt = _build_system_prompt(context_bundle)
     
     # Create ephemeral session via OpenAI

@@ -11,6 +11,11 @@ interface VersionInfo {
   version: string;
 }
 
+interface HealthInfo {
+  service?: string;
+  version?: string;
+}
+
 interface CorsTestResult {
   origin: string;
   is_allowed: boolean;
@@ -34,38 +39,63 @@ export function ApiStatus() {
     setError(null);
     
     try {
-      // Try version endpoint first
-      const versionRes = await fetch(`${API_BASE_URL}/version`, {
+      // Use /health as source of truth for API availability.
+      const healthRes = await fetch(`${API_BASE_URL}/health`, {
         signal: AbortSignal.timeout(5000)
       });
-      
-      if (versionRes.ok) {
-        const versionData = await versionRes.json();
-        setVersion(versionData);
-        
-        // Also run CORS test
-        try {
-          const corsRes = await fetch(`${API_BASE_URL}/cors-test`, {
-            signal: AbortSignal.timeout(5000)
-          });
-          if (corsRes.ok) {
-            const corsData = await corsRes.json();
-            setCorsTest(corsData);
-            
-            if (!corsData.is_allowed) {
-              setStatus('cors-error');
-              setError(`Origin not in CORS allowlist: ${corsData.origin}`);
-            } else {
-              setStatus('online');
-            }
-          }
-        } catch (corsErr) {
-          // CORS test failed but version worked - still consider online
-          setStatus('online');
-        }
-      } else {
+
+      if (!healthRes.ok) {
         setStatus('offline');
-        setError(`HTTP ${versionRes.status}: ${versionRes.statusText}`);
+        setError(`HTTP ${healthRes.status}: ${healthRes.statusText}`);
+        setLastCheck(new Date());
+        return;
+      }
+
+      const healthData: HealthInfo = await healthRes.json();
+      setStatus('online');
+
+      // /version is optional: use it when available, otherwise fall back to /health metadata.
+      let resolvedVersion: VersionInfo = {
+        git_sha: 'unknown',
+        build_time: 'unknown',
+        environment: process.env.NODE_ENV || 'unknown',
+        service: healthData.service || 'unknown',
+        version: healthData.version || 'unknown',
+      };
+
+      try {
+        const versionRes = await fetch(`${API_BASE_URL}/version`, {
+          signal: AbortSignal.timeout(3000)
+        });
+
+        if (versionRes.ok) {
+          resolvedVersion = await versionRes.json();
+        }
+      } catch {
+        // Ignore optional /version failures.
+      }
+
+      setVersion(resolvedVersion);
+
+      // /cors-test is optional: only apply when endpoint exists and returns data.
+      try {
+        const corsRes = await fetch(`${API_BASE_URL}/cors-test`, {
+          signal: AbortSignal.timeout(3000)
+        });
+
+        if (corsRes.ok) {
+          const corsData = await corsRes.json();
+          setCorsTest(corsData);
+
+          if (!corsData.is_allowed) {
+            setStatus('cors-error');
+            setError(`Origin not in CORS allowlist: ${corsData.origin}`);
+          }
+        } else {
+          setCorsTest(null);
+        }
+      } catch {
+        setCorsTest(null);
       }
     } catch (err: any) {
       if (err.name === 'AbortError' || err.name === 'TimeoutError') {

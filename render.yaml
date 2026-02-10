@@ -24,7 +24,7 @@ services:
       - key: PINECONE_INDEX_NAME
         sync: false
       - key: ALLOWED_ORIGINS
-        value: "*" # Update with your Vercel URL
+        value: "https://digitalbrains.vercel.app,http://localhost:3000,http://127.0.0.1:3000"
       - key: DEV_MODE
         value: "false"
       - key: GRAPH_RAG_ENABLED

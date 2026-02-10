@@ -375,3 +375,81 @@ def test_context_mismatch_forces_new_conversation():
             assert "context_mismatch" in (metadata["context_reset_reason"] or "")
     finally:
         app.dependency_overrides = {}
+
+
+def test_owner_chat_accepts_node_update_stream_shape():
+    app.dependency_overrides[get_current_user] = _owner_user
+    gate_mock = AsyncMock(
+        return_value={
+            "decision": "ANSWER",
+            "requires_owner": False,
+            "reason": "test",
+            "owner_memory": [],
+            "owner_memory_refs": [],
+            "owner_memory_context": "",
+        }
+    )
+
+    async def _fake_node_update_stream(*_args, **_kwargs):
+        yield {"retrieve": {"citations": ["src-node-1"], "confidence_score": 0.73}}
+        msg = AIMessage(content="node-shape answer")
+        msg.additional_kwargs = {
+            "intent_label": "factual_with_evidence",
+            "module_ids": ["procedural.decision.cite_first"],
+            "persona_spec_version": "4.2.0",
+        }
+        yield {"realizer": {"messages": [msg]}}
+
+    audit_mock = AsyncMock(
+        return_value=(
+            "node-shape answer",
+            "factual_with_evidence",
+            ["procedural.decision.cite_first"],
+        )
+    )
+
+    try:
+        with patch("routers.chat.verify_twin_ownership"), patch(
+            "routers.chat.ensure_twin_active"
+        ), patch(
+            "routers.chat.get_user_group", new=AsyncMock(return_value=None)
+        ), patch(
+            "routers.chat.get_default_group", new=AsyncMock(return_value={"id": "group-1"})
+        ), patch(
+            "routers.chat._fetch_conversation_record",
+            return_value={
+                "id": "conv-1",
+                "twin_id": "twin-1",
+                "group_id": "group-1",
+                "interaction_context": "owner_chat",
+                "training_session_id": None,
+            },
+        ), patch(
+            "routers.chat.get_messages", return_value=[]
+        ), patch(
+            "routers.chat.log_interaction"
+        ), patch(
+            "routers.chat.run_identity_gate", gate_mock
+        ), patch(
+            "routers.chat.run_agent_stream", _fake_node_update_stream
+        ), patch(
+            "routers.chat._apply_persona_audit", audit_mock
+        ), patch(
+            "modules.graph_context.get_graph_stats", return_value={"has_graph": False, "node_count": 0}
+        ):
+            resp = client.post(
+                "/chat/twin-1",
+                json={"query": "give me proof", "conversation_id": "conv-1"},
+            )
+            assert resp.status_code == 200
+            blocks = _parse_sse_blocks(resp.text)
+            metadata = next((b for b in blocks if b.get("type") == "metadata"), None)
+            content = next((b for b in blocks if b.get("type") == "content"), None)
+            assert metadata is not None
+            assert content is not None
+            assert metadata["citations"] == ["src-node-1"]
+            assert metadata["intent_label"] == "factual_with_evidence"
+            assert metadata["module_ids"] == ["procedural.decision.cite_first"]
+            assert content["content"] == "node-shape answer"
+    finally:
+        app.dependency_overrides = {}

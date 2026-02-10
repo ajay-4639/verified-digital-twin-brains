@@ -7,7 +7,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, System
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
-from modules.tools import get_retrieval_tool, get_cloud_tools
+from modules.tools import get_retrieval_tool
 from modules.observability import supabase
 from modules.persona_compiler import (
     compile_prompt_plan,
@@ -194,48 +194,6 @@ class TwinState(TypedDict):
     owner_memory_context: Optional[str]
     system_prompt_override: Optional[str]
 
-def create_twin_agent(
-    twin_id: str,
-    group_id: Optional[str] = None,
-    system_prompt_override: str = None,
-    full_settings: dict = None,
-    graph_context: str = "",
-    owner_memory_context: str = ""
-):
-    # Initialize the LLM
-    api_key = os.getenv("OPENAI_API_KEY")
-    
-    # Extract tool_access override if present from full_settings
-    # (group settings should already be merged in run_agent_stream)
-    allowed_tools = None
-    if full_settings and "tool_access" in full_settings:
-        tool_access_config = full_settings.get("tool_access", {})
-        if isinstance(tool_access_config, list):
-            allowed_tools = tool_access_config
-        elif isinstance(tool_access_config, dict) and "allowed_tools" in tool_access_config:
-            allowed_tools = tool_access_config["allowed_tools"]
-    
-    # Ensure full_settings is a dict
-    if full_settings is None:
-        full_settings = {}
-    
-    # Apply group overrides for specific fields
-    temperature = full_settings.get("temperature") if "temperature" in full_settings else 0
-    max_tokens = full_settings.get("max_tokens")
-    
-    # Using a model that supports tool calling well
-    llm = ChatOpenAI(
-        model="gpt-4-turbo-preview", 
-        api_key=api_key, 
-        temperature=temperature, 
-        streaming=True,
-        max_tokens=max_tokens if max_tokens else None
-    )
-    
-    # Setup tools
-    cloud_tools = get_cloud_tools(allowed_tools=allowed_tools)
-    
-    # Helper: Build the system prompt with persona and context
 def build_system_prompt_with_trace(state: TwinState) -> tuple[str, Dict[str, Any]]:
     """
     Build prompt text plus persona runtime trace metadata (Phase 3).

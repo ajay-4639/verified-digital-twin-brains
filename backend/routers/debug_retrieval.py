@@ -17,6 +17,26 @@ class RetrievalDebugRequest(BaseModel):
     twin_id: str
     top_k: int = 10
 
+
+def _normalize_json(value):
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if (
+        hasattr(value, "item")
+        and callable(getattr(value, "item", None))
+        and type(value).__module__.startswith("numpy")
+    ):
+        try:
+            return _normalize_json(value.item())
+        except Exception:
+            pass
+    if isinstance(value, list):
+        return [_normalize_json(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _normalize_json(v) for k, v in value.items()}
+    return str(value)
+
+
 @router.post("/retrieval")
 async def debug_retrieval(
     request: RetrievalDebugRequest,
@@ -67,8 +87,8 @@ async def debug_retrieval(
             "query": request.query,
             "twin_id": request.twin_id,
             "results_count": len(contexts),
-            "diagnostics": diagnostics,
-            "contexts": contexts
+            "diagnostics": _normalize_json(diagnostics),
+            "contexts": _normalize_json(contexts)
         }
         
     except Exception as e:

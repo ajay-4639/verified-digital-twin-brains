@@ -111,6 +111,52 @@ def _normalize_json(value):
     return str(value)
 
 
+def _extract_stream_payload(event: dict) -> tuple[Optional[dict], Optional[dict]]:
+    """
+    Extract tool/agent payloads from either legacy stream shape:
+      {"tools": {...}} / {"agent": {...}}
+    or LangGraph node-update shape:
+      {"retrieve": {...}} / {"realizer": {...}}.
+    """
+    if not isinstance(event, dict):
+        return None, None
+
+    tools_payload = event.get("tools") if isinstance(event.get("tools"), dict) else None
+    agent_payload = event.get("agent") if isinstance(event.get("agent"), dict) else None
+
+    if tools_payload is None:
+        for node_payload in event.values():
+            if not isinstance(node_payload, dict):
+                continue
+            if "citations" in node_payload or "confidence_score" in node_payload:
+                tools_payload = {}
+                if "citations" in node_payload:
+                    citations = _normalize_json(node_payload.get("citations"))
+                    if isinstance(citations, list):
+                        tools_payload["citations"] = citations
+                confidence = node_payload.get("confidence_score")
+                if confidence is not None:
+                    try:
+                        tools_payload["confidence_score"] = float(confidence)
+                    except Exception:
+                        pass
+                if not tools_payload:
+                    tools_payload = None
+                else:
+                    break
+
+    if agent_payload is None:
+        for node_payload in event.values():
+            if not isinstance(node_payload, dict):
+                continue
+            messages = node_payload.get("messages")
+            if isinstance(messages, list):
+                agent_payload = {"messages": messages}
+                break
+
+    return tools_payload, agent_payload
+
+
 def _fetch_conversation_record(conversation_id: str):
     try:
         res = (
@@ -507,16 +553,21 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                     finally:
                         pending_task = None
 
+                    tools_payload, agent_payload = _extract_stream_payload(chunk)
+
                     # Capture metadata from tools
-                    if "tools" in chunk:
-                        data = chunk["tools"]
-                        citations = data.get("citations", citations)
-                        confidence_score = data.get("confidence_score", confidence_score)
+                    if tools_payload:
+                        next_citations = tools_payload.get("citations")
+                        if isinstance(next_citations, list):
+                            citations = next_citations
+                        next_confidence = tools_payload.get("confidence_score")
+                        if isinstance(next_confidence, (int, float)):
+                            confidence_score = float(next_confidence)
                         print(f"[Chat] Tools event: confidence={confidence_score}, citations={len(citations)}")
     
                     # Capture final response and metadata from agent
-                    if "agent" in chunk:
-                        msgs = chunk["agent"]["messages"]
+                    if agent_payload:
+                        msgs = agent_payload.get("messages", [])
                         if msgs and isinstance(msgs[-1], AIMessage):
                             msg = msgs[-1]
                             
@@ -931,12 +982,21 @@ async def chat_widget(twin_id: str, request: ChatWidgetRequest, req_raw: Request
             conversation_id=conversation_id,
             owner_memory_context=owner_memory_context
         ):
-            if "tools" in event:
-                citations = event["tools"].get("citations", citations)
-                confidence_score = event["tools"].get("confidence_score", confidence_score)
+            tools_payload, agent_payload = _extract_stream_payload(event)
 
-            if "agent" in event:
-                msg = event["agent"]["messages"][-1]
+            if tools_payload:
+                next_citations = tools_payload.get("citations")
+                if isinstance(next_citations, list):
+                    citations = next_citations
+                next_confidence = tools_payload.get("confidence_score")
+                if isinstance(next_confidence, (int, float)):
+                    confidence_score = float(next_confidence)
+
+            if agent_payload:
+                messages = agent_payload.get("messages", [])
+                if not messages:
+                    continue
+                msg = messages[-1]
                 if isinstance(msg, AIMessage):
                     if hasattr(msg, "additional_kwargs") and isinstance(msg.additional_kwargs, dict):
                         intent_label = msg.additional_kwargs.get("intent_label", intent_label)
@@ -1144,10 +1204,16 @@ async def public_chat_endpoint(twin_id: str, token: str, request: PublicChatRequ
             conversation_id=conversation_id,
             owner_memory_context=owner_memory_context
         ):
-            if "tools" in event:
-                citations = event["tools"].get("citations", citations)
-            if "agent" in event:
-                msg = event["agent"]["messages"][-1]
+            tools_payload, agent_payload = _extract_stream_payload(event)
+            if tools_payload:
+                next_citations = tools_payload.get("citations")
+                if isinstance(next_citations, list):
+                    citations = next_citations
+            if agent_payload:
+                messages = agent_payload.get("messages", [])
+                if not messages:
+                    continue
+                msg = messages[-1]
                 if isinstance(msg, AIMessage) and msg.content:
                     if hasattr(msg, "additional_kwargs") and isinstance(msg.additional_kwargs, dict):
                         intent_label = msg.additional_kwargs.get("intent_label", intent_label)

@@ -298,10 +298,20 @@ def _process_general_matches(merged_general_hits: List[Dict[str, Any]]) -> List[
     """
     raw_general_chunks = []
     for match in merged_general_hits:
+        raw_score = match.get("score", 0.0)
+        raw_rrf_score = match.get("rrf_score", 0.0)
+        try:
+            score = float(raw_score)
+        except Exception:
+            score = 0.0
+        try:
+            rrf_score = float(raw_rrf_score)
+        except Exception:
+            rrf_score = 0.0
         raw_general_chunks.append({
             "text": match["metadata"]["text"],
-            "score": match.get("score", 0.0),
-            "rrf_score": match.get("rrf_score", 0.0),
+            "score": score,
+            "rrf_score": rrf_score,
             "source_id": match["metadata"].get("source_id", "unknown"),
             "chunk_id": match["metadata"].get("chunk_id", "unknown"),
             "is_verified": False,
@@ -485,7 +495,7 @@ async def retrieve_context_vectors(
             rerank_request = RerankRequest(query=query, passages=passages)
             results = ranker.rerank(rerank_request)
 
-            max_rerank_score = max((res.get("score", 0) for res in results), default=0)
+            max_rerank_score = max((float(res.get("score", 0) or 0) for res in results), default=0)
             if max_rerank_score < 0.001:
                 print("[Retrieval] Rerank scores too low. Using vector scores.")
                 final_contexts = unique_contexts[:top_k]
@@ -494,7 +504,7 @@ async def retrieve_context_vectors(
                 for res in results:
                     original_idx = int(res["id"])
                     ctx = unique_contexts[original_idx]
-                    ctx["score"] = res["score"] # Update score with rerank score
+                    ctx["score"] = float(res.get("score", 0.0) or 0.0) # Update score with rerank score
                     final_contexts.append(ctx)
                 
                 # Limit to requested top_k
@@ -510,12 +520,12 @@ async def retrieve_context_vectors(
     
     print(f"[Retrieval] Found {len(final_contexts)} contexts for twin_id={twin_id} (namespace={twin_id})")
     if final_contexts:
-        top_scores = [round(c.get("score", 0.0), 3) for c in final_contexts[:3]]
+        top_scores = [round(float(c.get("score", 0.0) or 0.0), 3) for c in final_contexts[:3]]
         print(f"[Retrieval] Top scores: {top_scores}")
     
     # Check if retrieval is too weak - signal for "I don't know" response
     # Threshold lowered to 0.001 for calibration (FlashRank scores might be low logits or unnormalized)
-    max_score = max([c.get("score", 0.0) for c in final_contexts], default=0.0)
+    max_score = max([float(c.get("score", 0.0) or 0.0) for c in final_contexts], default=0.0)
     if max_score < 0.001 and len(final_contexts) > 0:
         print(f"[Retrieval] Max score {max_score} < 0.001. Triggering 'I don't know' logic.")
         return []

@@ -3,6 +3,7 @@
 import { useCallback } from 'react';
 import { getSupabaseClient } from '@/lib/supabase/client';
 import { API_BASE_URL } from '@/lib/constants';
+import { useRequestLogger, generateRequestId } from './useRequestLogger';
 
 /**
  * Custom hook for making authenticated API requests.
@@ -10,6 +11,7 @@ import { API_BASE_URL } from '@/lib/constants';
  */
 export function useAuthFetch() {
     const supabase = getSupabaseClient();
+    const { logRequest, logResponse, logError, isEnabled } = useRequestLogger();
 
     /**
      * Get the current auth token
@@ -46,10 +48,18 @@ export function useAuthFetch() {
             headers['Content-Type'] = 'application/json';
         }
 
-        const correlationId = Math.random().toString(36).substring(7);
+        const correlationId = generateRequestId();
         const url = endpoint.startsWith('http') ? endpoint : `${API_BASE_URL}${endpoint}`;
+        const method = options.method || 'GET';
 
-        console.log(`[useAuthFetch] [${correlationId}] ${options.method || 'GET'} ${url} START (Auth: ${token ? 'Bearer' : 'None'})`);
+        // Log to console for immediate debugging
+        console.log(`[useAuthFetch] [${correlationId}] ${method} ${url} START (Auth: ${token ? 'Bearer' : 'None'})`);
+        
+        // Log to request logger for DebugPanel (if enabled)
+        if (isEnabled) {
+            logRequest(correlationId, method, url, options.body?.toString(), headers);
+        }
+        
         const startTime = Date.now();
 
         try {
@@ -58,16 +68,28 @@ export function useAuthFetch() {
                 headers,
             });
             const duration = Date.now() - startTime;
-            console.log(`[useAuthFetch] [${correlationId}] ${options.method || 'GET'} ${url} END [${response.status}] (${duration}ms)`);
+            
+            console.log(`[useAuthFetch] [${correlationId}] ${method} ${url} END [${response.status}] (${duration}ms)`);
 
             if (response.status === 401 || response.status === 403) {
                 console.warn(`[useAuthFetch] [${correlationId}] AUTH ERROR ${response.status} on ${url}`);
+            }
+            
+            // Log to request logger
+            if (isEnabled) {
+                logResponse(correlationId, response);
             }
 
             return response;
         } catch (error) {
             const duration = Date.now() - startTime;
             console.error(`[useAuthFetch] [${correlationId}] ${url} ERROR after ${duration}ms:`, error);
+            
+            // Log error to request logger
+            if (isEnabled && error instanceof Error) {
+                logError(correlationId, error);
+            }
+            
             throw error;
         }
     }, [getAuthToken]);

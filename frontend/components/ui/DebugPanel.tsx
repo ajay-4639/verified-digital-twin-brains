@@ -1,13 +1,16 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { API_BASE_URL, API_ENDPOINTS } from '@/lib/constants';
 import { useRequestLogger } from '@/lib/hooks/useRequestLogger';
+import type { RequestLog } from '@/lib/hooks/useRequestLogger';
 
 export function DebugPanel() {
   const [isOpen, setIsOpen] = useState(false);
   const { logs, isEnabled, clearLogs, toggleEnabled } = useRequestLogger();
   const [activeTab, setActiveTab] = useState<'requests' | 'config'>('requests');
+  const [replayResult, setReplayResult] = useState<{logId: string; status: number; statusText: string; duration: number} | null>(null);
+  const [replayingId, setReplayingId] = useState<string | null>(null);
 
   // Only show in development
   if (process.env.NODE_ENV !== 'development') return null;
@@ -18,6 +21,49 @@ export function DebugPanel() {
     if (status >= 400) return 'text-red-600';
     return 'text-yellow-600';
   };
+
+  const replayRequest = useCallback(async (log: RequestLog) => {
+    setReplayingId(log.id);
+    setReplayResult(null);
+    
+    const startTime = performance.now();
+    try {
+      // Strip Authorization header for security - user must be re-authenticated
+      const headers: Record<string, string> = {};
+      if (log.requestHeaders) {
+        Object.entries(log.requestHeaders).forEach(([key, value]) => {
+          // Skip auth headers - they'll be re-added by useAuthFetch if needed
+          if (key.toLowerCase() !== 'authorization') {
+            headers[key] = value;
+          }
+        });
+      }
+
+      const response = await fetch(log.url, {
+        method: log.method,
+        headers,
+        body: log.requestBody || undefined,
+      });
+      
+      const duration = Math.round(performance.now() - startTime);
+      setReplayResult({
+        logId: log.id,
+        status: response.status,
+        statusText: response.statusText,
+        duration
+      });
+    } catch (error) {
+      const duration = Math.round(performance.now() - startTime);
+      setReplayResult({
+        logId: log.id,
+        status: 0,
+        statusText: error instanceof Error ? error.message : 'Network Error',
+        duration
+      });
+    } finally {
+      setReplayingId(null);
+    }
+  }, []);
 
   return (
     <>
@@ -111,9 +157,35 @@ export function DebugPanel() {
                             {log.error}
                           </div>
                         )}
-                        <div className="text-slate-300 mt-1">
-                          {log.timestamp.toLocaleTimeString()}
+                        <div className="flex items-center justify-between mt-2">
+                          <span className="text-slate-300">
+                            {log.timestamp.toLocaleTimeString()}
+                          </span>
+                          <button
+                            onClick={() => replayRequest(log)}
+                            disabled={replayingId === log.id}
+                            className="px-2 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded text-[10px] font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            title="Replay this request"
+                          >
+                            {replayingId === log.id ? 'Replaying...' : '↻ Replay'}
+                          </button>
                         </div>
+                        {replayResult?.logId === log.id && (
+                          <div className={`mt-2 p-2 rounded ${replayResult.status >= 200 && replayResult.status < 300 ? 'bg-green-50 border border-green-100' : 'bg-red-50 border border-red-100'}`}>
+                            <div className="flex items-center gap-2">
+                              <span className="text-slate-500">Replay:</span>
+                              <span className={`font-bold ${getStatusColor(replayResult.status)}`}>
+                                {replayResult.status || 'ERR'}
+                              </span>
+                              <span className="text-slate-400 ml-auto">
+                                {replayResult.duration}ms
+                              </span>
+                            </div>
+                            {replayResult.statusText && replayResult.status !== replayResult.status && (
+                              <div className="text-slate-500 mt-0.5">{replayResult.statusText}</div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     ))
                   )}

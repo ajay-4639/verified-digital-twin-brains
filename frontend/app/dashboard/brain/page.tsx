@@ -59,6 +59,7 @@ export default function BrainGraphPage() {
     const fetchGraph = async () => {
         try {
             setLoading(true);
+            if (!twinId) return;
             const { data: { session } } = await supabase.auth.getSession();
             const token = session?.access_token;
             if (!token) return;
@@ -79,6 +80,7 @@ export default function BrainGraphPage() {
 
     const fetchVersions = async () => {
         try {
+            if (!twinId) return;
             const { data: { session } } = await supabase.auth.getSession();
             const token = session?.access_token;
             if (!token) return;
@@ -100,6 +102,7 @@ export default function BrainGraphPage() {
 
     const handleApprove = async () => {
         if (approving) return;
+        if (!twinId) return;
         setApproving(true);
         try {
             const { data: { session } } = await supabase.auth.getSession();

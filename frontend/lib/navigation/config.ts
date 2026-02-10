@@ -43,6 +43,12 @@ export const SIDEBAR_CONFIG: SidebarConfig = [
         items: [
             { name: 'Settings', href: '/dashboard/settings', icon: 'settings' },
         ]
+    },
+    {
+        title: 'System',
+        items: [
+            { name: 'Admin', href: '/admin', icon: 'shield' },
+        ]
     }
 ];
 

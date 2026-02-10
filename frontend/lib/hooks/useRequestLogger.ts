@@ -2,7 +2,7 @@
 
 import { useCallback, useRef, useState, useEffect } from 'react';
 
-interface RequestLog {
+export interface RequestLog {
   id: string;
   timestamp: Date;
   method: string;
@@ -12,6 +12,7 @@ interface RequestLog {
   duration: number;
   error?: string;
   requestBody?: string;
+  requestHeaders?: Record<string, string>;
   responsePreview?: string;
 }
 
@@ -24,15 +25,17 @@ export function useRequestLogger(options: RequestLoggerOptions = {}) {
   const { maxLogs = 50, enabled = process.env.NODE_ENV === 'development' } = options;
   const [logs, setLogs] = useState<RequestLog[]>([]);
   const [isEnabled, setIsEnabled] = useState(enabled);
-  const activeRequests = useRef<Map<string, { startTime: number; url: string; method: string }>>(new Map());
+  const activeRequests = useRef<Map<string, { startTime: number; url: string; method: string; body?: string; headers?: Record<string, string> }>>(new Map());
 
-  const logRequest = useCallback((id: string, method: string, url: string, body?: string) => {
+  const logRequest = useCallback((id: string, method: string, url: string, body?: string, headers?: Record<string, string>) => {
     if (!isEnabled) return;
     
     activeRequests.current.set(id, {
       startTime: performance.now(),
       url,
-      method
+      method,
+      body,
+      headers
     });
   }, [isEnabled]);
 
@@ -51,7 +54,9 @@ export function useRequestLogger(options: RequestLoggerOptions = {}) {
       url: request.url,
       status: response.status,
       statusText: response.statusText,
-      duration: Math.round(duration)
+      duration: Math.round(duration),
+      requestBody: request.body,
+      requestHeaders: request.headers
     };
 
     setLogs(prev => [log, ...prev].slice(0, maxLogs));
@@ -72,7 +77,9 @@ export function useRequestLogger(options: RequestLoggerOptions = {}) {
       method: request.method,
       url: request.url,
       duration: Math.round(duration),
-      error: error.message
+      error: error.message,
+      requestBody: request.body,
+      requestHeaders: request.headers
     };
 
     setLogs(prev => [log, ...prev].slice(0, maxLogs));

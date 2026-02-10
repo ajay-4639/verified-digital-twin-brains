@@ -24,7 +24,11 @@ services:
       - key: PINECONE_INDEX_NAME
         sync: false
       - key: ALLOWED_ORIGINS
-        value: "https://digitalbrains.vercel.app,http://localhost:3000,http://127.0.0.1:3000"
+        value: "https://digitalbrains.vercel.app,https://*.vercel.app,http://localhost:3000,http://127.0.0.1:3000"
+      - key: GIT_SHA
+        value: "{{ .Render.gitSha }}"
+      - key: BUILD_TIME
+        value: "{{ .Render.buildTime }}"
       - key: DEV_MODE
         value: "false"
       - key: GRAPH_RAG_ENABLED

@@ -5,8 +5,7 @@ import Link from 'next/link';
 import { useTwin } from '@/lib/context/TwinContext';
 import { authFetchStandalone } from '@/lib/hooks/useAuthFetch';
 import { EmptyState, EmptyTwinNoActivity } from '@/components/ui/EmptyState';
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+import { API_BASE_URL, API_ENDPOINTS } from '@/lib/constants';
 
 interface Stats {
   conversations: number;
@@ -63,7 +62,7 @@ export default function DashboardPage() {
   useEffect(() => {
     const checkHealth = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/health`);
+        const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.HEALTH}`);
         if (response.ok) {
           const data = await response.json();
           setSystemStatus(data.status === 'online' ? 'online' : 'degraded');
@@ -105,7 +104,7 @@ export default function DashboardPage() {
       if (currentTwinId) {
         // Fetch real dashboard stats
         try {
-          const statsResponse = await fetch(`${API_BASE_URL}/metrics/dashboard/${currentTwinId}?days=30`);
+          const statsResponse = await fetch(`${API_BASE_URL}${API_ENDPOINTS.METRICS_DASHBOARD(currentTwinId)}?days=30`);
           if (statsResponse.ok) {
             const data = await statsResponse.json();
             setStats({
@@ -124,7 +123,7 @@ export default function DashboardPage() {
 
         // Fetch real activity feed
         try {
-          const activityResponse = await fetch(`${API_BASE_URL}/metrics/activity/${currentTwinId}?limit=5`);
+          const activityResponse = await fetch(`${API_BASE_URL}${API_ENDPOINTS.METRICS_ACTIVITY(currentTwinId)}?limit=5`);
           if (activityResponse.ok) {
             const data = await activityResponse.json();
             setRecentActivity(data.map((item: any) => ({
@@ -155,7 +154,7 @@ export default function DashboardPage() {
 
     setLoadingConversations(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/metrics/conversations/${twinId}?limit=20`);
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.METRICS_CONVERSATIONS(twinId)}?limit=20`);
       if (response.ok) {
         const data = await response.json();
         setConversations(data);

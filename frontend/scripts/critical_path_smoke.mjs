@@ -56,7 +56,24 @@ if (!fs.existsSync(proofDataPath)) {
 
 const proofData = JSON.parse(fs.readFileSync(proofDataPath, 'utf8'));
 const twinId = proofData.twin_id;
-const shareUrl = proofData.share_url;
+function normalizeShareUrl(rawShareUrl) {
+  if (!rawShareUrl) return rawShareUrl;
+  try {
+    const parsed = new URL(rawShareUrl);
+    if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') {
+      const base = new URL(FRONTEND_URL);
+      return `${base.origin}${parsed.pathname}${parsed.search}${parsed.hash}`;
+    }
+    return rawShareUrl;
+  } catch {
+    if (rawShareUrl.startsWith('/')) {
+      return `${FRONTEND_URL}${rawShareUrl}`;
+    }
+    return rawShareUrl;
+  }
+}
+
+const shareUrl = normalizeShareUrl(proofData.share_url);
 const uniquePhrase = proofData.unique_phrase;
 
 async function loginIfNeeded(page) {

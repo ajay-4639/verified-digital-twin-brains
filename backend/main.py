@@ -1,9 +1,11 @@
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Request
 import os
 import sys
 import time
+
+# Import our dynamic CORS middleware
+from modules.cors_middleware import create_cors_middleware, get_allowed_origins
 
 from routers import (
     auth,
@@ -41,22 +43,9 @@ from modules.specializations import get_specialization
 
 app = FastAPI(title="Verified Digital Twin Brain API")
 
-# Add CORS middleware
-# Explicitly allow localhost:3000 if ALLOWED_ORIGINS is not set
-allowed_origins_raw = os.getenv("ALLOWED_ORIGINS")
-if allowed_origins_raw:
-    allowed_origins = allowed_origins_raw.split(",")
-else:
-    allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["x-correlation-id"],
-)
+# Add Dynamic CORS middleware with wildcard pattern support
+# Supports *.vercel.app for preview deployments
+app = create_cors_middleware(app)
 
 # Request tracing middleware for deployment debugging
 @app.middleware("http")
@@ -155,6 +144,81 @@ async def health_check():
 async def root_health():
     """Fallback health check for platforms checking the root path."""
     return await health_check()
+
+# ============================================================================
+# P0 Deployment: Version Endpoint for Deployment Verification
+# ============================================================================
+
+import subprocess
+
+@app.get("/version", tags=["health"])
+async def version():
+    """
+    Return build version info for deployment verification.
+    
+    This endpoint helps verify which git commit is running in production,
+    preventing the "changes not reflecting" debugging nightmare.
+    """
+    git_sha = os.getenv("GIT_SHA", "unknown")
+    
+    # Try to get git SHA from filesystem if not in env (development)
+    if git_sha == "unknown":
+        try:
+            git_sha = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                stderr=subprocess.DEVNULL
+            ).decode().strip()
+        except Exception:
+            pass
+    
+    build_time = os.getenv("BUILD_TIME", "unknown")
+    environment = "production" if os.getenv("DEV_MODE", "true").lower() == "false" else "development"
+    
+    return {
+        "git_sha": git_sha,
+        "build_time": build_time,
+        "environment": environment,
+        "service": "verified-digital-twin-brain-api",
+        "version": "1.0.0"
+    }
+
+
+@app.get("/cors-test", tags=["health"])
+async def cors_test(request: Request):
+    """
+    CORS test endpoint for debugging cross-origin issues.
+    
+    Returns information about the request origin and whether it's allowed.
+    """
+    origin = request.headers.get("origin", "no-origin")
+    allowed_origins = get_allowed_origins()
+    
+    # Check if origin matches any pattern
+    is_allowed = False
+    matched_pattern = None
+    
+    for pattern in allowed_origins:
+        if '*' in pattern or '?' in pattern:
+            import fnmatch
+            if fnmatch.fnmatch(origin, pattern):
+                is_allowed = True
+                matched_pattern = pattern
+                break
+        elif origin == pattern:
+            is_allowed = True
+            matched_pattern = pattern
+            break
+    
+    return {
+        "origin": origin,
+        "is_allowed": is_allowed,
+        "matched_pattern": matched_pattern,
+        "allowed_origins": allowed_origins,
+        "headers": dict(request.headers),
+        "timestamp": time.time()
+    }
+
 
 # ============================================================================
 # P0 Deployment: Startup Validation

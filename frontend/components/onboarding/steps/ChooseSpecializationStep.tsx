@@ -17,7 +17,7 @@ interface ChooseSpecializationStepProps {
     userTier?: 'free' | 'premium';
 }
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+import { API_BASE_URL, API_ENDPOINTS } from '@/lib/constants';
 
 export const ChooseSpecializationStep: React.FC<ChooseSpecializationStepProps> = ({
     selectedSpecialization,
@@ -31,7 +31,7 @@ export const ChooseSpecializationStep: React.FC<ChooseSpecializationStepProps> =
     useEffect(() => {
         const fetchSpecializations = async () => {
             try {
-                const response = await fetch(`${API_BASE_URL}/specializations`);
+                const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.SPECIALIZATIONS}`);
                 if (response.ok) {
                     const data = await response.json();
                     setSpecializations(data);

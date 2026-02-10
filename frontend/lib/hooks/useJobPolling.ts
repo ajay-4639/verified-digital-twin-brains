@@ -2,8 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { getSupabaseClient } from '@/lib/supabase/client';
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+import { API_BASE_URL, API_ENDPOINTS } from '@/lib/constants';
 
 // Polling intervals based on job status (ms)
 const POLL_INTERVALS: Record<string, number> = {
@@ -118,8 +117,8 @@ export function useJobPolling({
     abortControllerRef.current = new AbortController();
 
     const url = jobId 
-      ? `${API_BASE_URL}/jobs/${jobId}`
-      : `${API_BASE_URL}/jobs?twin_id=${twinId}&limit=10`;
+      ? `${API_BASE_URL}${API_ENDPOINTS.JOB_DETAIL(jobId)}`
+      : `${API_BASE_URL}${API_ENDPOINTS.JOBS}?twin_id=${twinId}&limit=10`;
 
     const response = await fetch(url, {
       headers: { 'Authorization': `Bearer ${token}` },
@@ -220,7 +219,7 @@ export function useJobPolling({
 
     try {
       const response = await fetch(
-        `${API_BASE_URL}/jobs/${targetJobId}/logs?limit=50`,
+        `${API_BASE_URL}${API_ENDPOINTS.JOB_LOGS(targetJobId)}?limit=50`,
         { headers: { 'Authorization': `Bearer ${token}` } }
       );
 
@@ -240,7 +239,7 @@ export function useJobPolling({
 
     try {
       const response = await fetch(
-        `${API_BASE_URL}/jobs/${targetJobId}/retry`,
+        `${API_BASE_URL}${API_ENDPOINTS.JOB_RETRY(targetJobId)}`,
         {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}` },

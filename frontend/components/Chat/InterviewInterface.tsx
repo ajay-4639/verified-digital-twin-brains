@@ -3,7 +3,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { getSupabaseClient } from '@/lib/supabase/client';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+import { API_BASE_URL, API_ENDPOINTS } from '@/lib/constants';
 
 interface Message {
     role: 'user' | 'assistant';
@@ -73,7 +73,7 @@ export default function InterviewInterface({
                 throw new Error('Session expired. Please refresh the page to reconnect.');
             }
 
-            const response = await fetch(`${API_BASE_URL}/cognitive/interview/${twinId}`, {
+            const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.COGNITIVE_INTERVIEW(twinId)}`, {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${token}`,

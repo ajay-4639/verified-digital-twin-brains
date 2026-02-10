@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { getSupabaseClient } from '@/lib/supabase/client';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+import { API_BASE_URL, API_ENDPOINTS } from '@/lib/constants';
 
 interface Voice {
   voice_id: string;
@@ -65,7 +65,7 @@ export default function VoiceSettings({ twinId }: VoiceSettingsProps) {
           return;
         }
 
-        const voicesRes = await fetch(`${API_BASE_URL}/audio/voices`, {
+        const voicesRes = await fetch(`${API_BASE_URL}${API_ENDPOINTS.AUDIO_VOICES}`, {
           headers: { 'Authorization': `Bearer ${token}` },
         });
 
@@ -74,7 +74,7 @@ export default function VoiceSettings({ twinId }: VoiceSettingsProps) {
           setVoices(voicesData.voices || []);
         }
 
-        const settingsRes = await fetch(`${API_BASE_URL}/audio/settings/${twinId}`, {
+        const settingsRes = await fetch(`${API_BASE_URL}${API_ENDPOINTS.AUDIO_SETTINGS(twinId)}`, {
           headers: { 'Authorization': `Bearer ${token}` },
         });
 
@@ -112,7 +112,7 @@ export default function VoiceSettings({ twinId }: VoiceSettingsProps) {
         return;
       }
 
-      const response = await fetch(`${API_BASE_URL}/audio/settings/${twinId}`, {
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.AUDIO_SETTINGS(twinId)}`, {
         method: 'PUT',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -145,7 +145,7 @@ export default function VoiceSettings({ twinId }: VoiceSettingsProps) {
 
       const testText = "Hello! This is how I will sound when answering questions.";
       
-      const response = await fetch(`${API_BASE_URL}/audio/tts/${twinId}`, {
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.AUDIO_TTS(twinId)}`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,

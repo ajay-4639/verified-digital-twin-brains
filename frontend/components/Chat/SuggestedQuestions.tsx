@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { getSupabaseClient } from '@/lib/supabase/client';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+import { API_BASE_URL, API_ENDPOINTS } from '@/lib/constants';
 
 interface Question {
   question: string;
@@ -60,7 +60,7 @@ export default function SuggestedQuestions({ twinId, onSelect, disabled }: Sugge
       const token = await getAuthToken();
       
       // Try to fetch top questions from API
-      const response = await fetch(`${API_BASE_URL}/metrics/top-questions/${twinId}?limit=5`, {
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.METRICS_TOP_QUESTIONS(twinId)}?limit=5`, {
         headers: token ? { 'Authorization': `Bearer ${token}` } : {},
       });
 

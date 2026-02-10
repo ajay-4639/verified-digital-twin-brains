@@ -2,8 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+import { API_BASE_URL, API_ENDPOINTS } from '@/lib/constants';
 
 interface InvitationInfo {
   email: string;
@@ -25,7 +24,7 @@ export default function AcceptInvitationPage() {
 
   const validateInvitation = useCallback(async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/auth/invitation/${token}`);
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.AUTH_INVITATION(token)}`);
       if (response.ok) {
         const data = await response.json();
         setInvitation(data);
@@ -58,7 +57,7 @@ export default function AcceptInvitationPage() {
     setError('');
 
     try {
-      const response = await fetch(`${API_BASE_URL}/auth/accept-invitation`, {
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.AUTH_ACCEPT_INVITATION}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'

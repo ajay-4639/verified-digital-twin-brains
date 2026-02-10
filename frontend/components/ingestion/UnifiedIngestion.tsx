@@ -3,7 +3,7 @@
 import React, { useState, useCallback } from 'react';
 import { getSupabaseClient } from '@/lib/supabase/client';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+import { API_BASE_URL, API_ENDPOINTS } from '@/lib/constants';
 
 interface ExtractedNode {
     id: string;
@@ -114,7 +114,7 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
 
         try {
             // Step 1: Ingest content
-            const endpoint = `${API_BASE_URL}${sourceConfig[detectedType].endpoint}/${twinId}`;
+            const endpoint = `${API_BASE_URL}${sourceConfig[detectedType].endpoint}/${twinId}`;  // Already has leading slash
             const response = await fetch(endpoint, {
                 method: 'POST',
                 headers: {
@@ -135,7 +135,7 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
             setStage('extracting');
 
             // Step 2: Extract nodes from the source
-            const extractResponse = await fetch(`${API_BASE_URL}/ingest/extract-nodes/${result.source_id}`, {
+            const extractResponse = await fetch(`${API_BASE_URL}${API_ENDPOINTS.INGEST_EXTRACT_NODES(result.source_id)}`, {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${token}`,
@@ -202,7 +202,7 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
         const timeoutId = setTimeout(() => controller.abort(), 180000);
 
         try {
-            const response = await fetch(`${API_BASE_URL}/ingest/file/${twinId}`, {
+            const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.INGEST_FILE(twinId)}`, {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token}` },
                 body: formData,

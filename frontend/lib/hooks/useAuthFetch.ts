@@ -2,8 +2,7 @@
 
 import { useCallback } from 'react';
 import { getSupabaseClient } from '@/lib/supabase/client';
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+import { API_BASE_URL } from '@/lib/constants';
 
 /**
  * Custom hook for making authenticated API requests.
@@ -406,4 +405,4 @@ export async function authFetchTwin(
     return authFetchStandalone(endpoint, options);
 }
 
-export { API_BASE_URL };
+export { API_BASE_URL };  // Re-export for backward compatibility

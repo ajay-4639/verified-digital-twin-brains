@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { getSupabaseClient } from '@/lib/supabase/client';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+import { API_BASE_URL, API_ENDPOINTS } from '@/lib/constants';
 
 interface Node {
   id: string;
@@ -239,7 +239,7 @@ export default function KnowledgeGraph({ twinId, onNodeSelect }: KnowledgeGraphP
           return;
         }
 
-        const res = await fetch(`${API_BASE_URL}/twins/${twinId}/graph?limit=200`, {
+        const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.TWIN_GRAPH(twinId)}?limit=200`, {
           headers: { 'Authorization': `Bearer ${token}` }
         });
 

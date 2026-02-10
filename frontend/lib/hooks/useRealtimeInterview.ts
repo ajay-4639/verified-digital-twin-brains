@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { API_BASE_URL } from '@/lib/hooks/useAuthFetch';
+import { API_BASE_URL, API_ENDPOINTS } from '@/lib/constants';
 
 interface TranscriptTurn {
     role: 'user' | 'assistant';
@@ -65,7 +65,7 @@ export function useRealtimeInterview(options: UseRealtimeInterviewOptions = {}) 
      */
     const createInterviewSession = useCallback(async (accessToken: string) => {
         const payload = options.twinId ? { twin_id: options.twinId } : {};
-        const response = await fetch(`${API_BASE_URL}/api/interview/sessions`, {
+        const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.INTERVIEW_SESSIONS}`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -89,7 +89,7 @@ export function useRealtimeInterview(options: UseRealtimeInterviewOptions = {}) 
         accessToken: string,
         systemPrompt: string
     ) => {
-        const response = await fetch(`${API_BASE_URL}/api/interview/realtime/sessions`, {
+        const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.INTERVIEW_REALTIME}`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -335,7 +335,7 @@ export function useRealtimeInterview(options: UseRealtimeInterviewOptions = {}) 
             try {
                 const accessToken = await getAccessToken();
 
-                const response = await fetch(`${API_BASE_URL}/api/interview/sessions/${interviewSessionIdRef.current}/finalize`, {
+                const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.INTERVIEW_FINALIZE(interviewSessionIdRef.current)}`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',

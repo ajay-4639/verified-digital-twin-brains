@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useAuthFetch, getAuthToken } from '@/lib/hooks/useAuthFetch';
+import { API_BASE_URL, API_ENDPOINTS } from '@/lib/constants';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -21,7 +22,7 @@ export default function GroupConsolePage() {
   const [loading, setLoading] = useState(false);
   const [twinId, setTwinId] = useState<string>('');
 
-  const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
 
   const fetchGroupInfo = useCallback(async () => {
     try {
@@ -57,7 +58,7 @@ export default function GroupConsolePage() {
         headers['Authorization'] = `Bearer ${token}`;
       }
 
-      const response = await fetch(`${API_BASE_URL}/chat/${twinId}`, {
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.CHAT(twinId)}`, {
         method: 'POST',
         headers,
         body: JSON.stringify({

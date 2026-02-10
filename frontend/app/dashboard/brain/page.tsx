@@ -5,8 +5,7 @@ import Link from 'next/link';
 import { useSpecialization } from '@/contexts/SpecializationContext';
 import { useTwin } from '@/lib/context/TwinContext';
 import { getSupabaseClient } from '@/lib/supabase/client';
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+import { API_BASE_URL, API_ENDPOINTS } from '@/lib/constants';
 
 interface Node {
     id: string;
@@ -64,7 +63,7 @@ export default function BrainGraphPage() {
             const token = session?.access_token;
             if (!token) return;
 
-            const res = await fetch(`${API_BASE_URL}/twins/${twinId}/graph?limit=100`, {
+            const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.TWIN_GRAPH(twinId)}?limit=100`, {
                 headers: { 'Authorization': `Bearer ${token}` }
             });
             if (res.ok) {
@@ -84,7 +83,7 @@ export default function BrainGraphPage() {
             const token = session?.access_token;
             if (!token) return;
 
-            const res = await fetch(`${API_BASE_URL}/cognitive/profiles/${twinId}/versions`, {
+            const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.COGNITIVE_PROFILE_VERSIONS(twinId)}`, {
                 headers: { 'Authorization': `Bearer ${token}` }
             });
             if (res.ok) {
@@ -110,7 +109,7 @@ export default function BrainGraphPage() {
                 return;
             }
 
-            const res = await fetch(`${API_BASE_URL}/cognitive/profiles/${twinId}/approve`, {
+            const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.COGNITIVE_PROFILES(twinId)}/approve`, {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${token}`,

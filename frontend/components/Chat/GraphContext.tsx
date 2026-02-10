@@ -17,7 +17,7 @@ interface GraphStats {
     top_nodes: GraphNode[];
 }
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+import { API_BASE_URL, API_ENDPOINTS } from '@/lib/constants';
 
 interface GraphContextProps {
     twinId: string;
@@ -37,7 +37,7 @@ export default function GraphContext({ twinId, compact = false }: GraphContextPr
 
             if (!session) return;
 
-            const response = await fetch(`${API_BASE_URL}/twins/${twinId}/graph-stats`, {
+            const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.TWIN_GRAPH_STATS(twinId)}`, {
                 headers: {
                     'Authorization': `Bearer ${session.access_token}`
                 }

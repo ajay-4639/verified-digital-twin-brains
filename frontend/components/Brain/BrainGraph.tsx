@@ -2,8 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { getSupabaseClient } from '@/lib/supabase/client';
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+import { API_BASE_URL, API_ENDPOINTS } from '@/lib/constants';
 
 interface Node {
     id: string;
@@ -61,7 +60,7 @@ export default function BrainGraph({
                     return;
                 }
 
-                const res = await fetch(`${API_BASE_URL}/twins/${twinId}/graph?limit=100`, {
+                const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.TWIN_GRAPH(twinId)}?limit=100`, {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
 

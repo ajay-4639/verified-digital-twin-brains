@@ -334,7 +334,7 @@ async function findAccessibleTwin(page, candidateIds, baseUrl) {
   await page.getByRole('button', { name: /save memory/i }).first().click();
 
   await page.waitForSelector('text=Saved. Ask again and I will answer using your memory.', { timeout: 60000 });
-  await page.getByRole('button', { name: /refresh/i }).click();
+  await page.getByRole('button', { name: /refresh/i }).first().click();
   await page.waitForTimeout(1500);
   await page.screenshot({ path: screenshotPath('ui_owner_step2_saved.png'), fullPage: true });
 
@@ -369,7 +369,7 @@ async function findAccessibleTwin(page, candidateIds, baseUrl) {
 
   await page.goto(trainingUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForSelector('text=Pending Clarifications', { timeout: 60000 });
-  await page.getByRole('button', { name: /refresh/i }).click();
+  await page.getByRole('button', { name: /refresh/i }).first().click();
   await page.waitForTimeout(1500);
 
   const pendingCard = page.locator('div', { hasText: topicTag2 }).first();

@@ -5,8 +5,7 @@ import { useTwin } from '@/lib/context/TwinContext';
 import { getSupabaseClient } from '@/lib/supabase/client';
 import UnifiedIngestion from '@/components/ingestion/UnifiedIngestion';
 import KnowledgeGraph from '@/components/Knowledge/KnowledgeGraph';
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+import { API_BASE_URL, API_ENDPOINTS } from '@/lib/constants';
 
 interface Source {
   id: string;
@@ -119,10 +118,10 @@ export default function KnowledgePage() {
     try {
       console.log('[Knowledge] Fetching for twinId:', twinId);
       const [sourcesRes, profileRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/sources/${twinId}`, {
+        fetch(`${API_BASE_URL}${API_ENDPOINTS.TWIN_SOURCES(twinId)}`, {
           headers: { 'Authorization': `Bearer ${token}` }
         }),
-        fetch(`${API_BASE_URL}/twins/${twinId}/knowledge-profile`, {
+        fetch(`${API_BASE_URL}${API_ENDPOINTS.TWIN_KNOWLEDGE_PROFILE(twinId)}`, {
           headers: { 'Authorization': `Bearer ${token}` }
         })
       ]);
@@ -153,14 +152,14 @@ export default function KnowledgePage() {
     if (!token) return;
 
     try {
-      const response = await fetch(`${API_BASE_URL}/sources/${twinId}/${sourceId}`, {
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.TWIN_SOURCE_DETAIL(twinId, sourceId)}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (response.ok) {
         setSources(sources.filter(s => s.id !== sourceId));
         // Refresh profile stats after deletion
-        const profileRes = await fetch(`${API_BASE_URL}/twins/${twinId}/knowledge-profile`, {
+        const profileRes = await fetch(`${API_BASE_URL}${API_ENDPOINTS.TWIN_KNOWLEDGE_PROFILE(twinId)}`, {
           headers: { 'Authorization': `Bearer ${token}` }
         });
         if (profileRes.ok) setProfile(await profileRes.json());

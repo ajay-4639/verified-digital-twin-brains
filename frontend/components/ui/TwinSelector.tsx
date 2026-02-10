@@ -3,10 +3,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useTwin } from '@/lib/context/TwinContext';
-
-
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+import { API_BASE_URL } from '@/lib/constants';
 
 // Specialization icons
 const SPEC_ICONS: Record<string, string> = {

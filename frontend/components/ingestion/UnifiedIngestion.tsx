@@ -1,9 +1,9 @@
 'use client';
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { getSupabaseClient } from '@/lib/supabase/client';
-
 import { API_BASE_URL, API_ENDPOINTS } from '@/lib/constants';
+import { useJobPoller } from '@/lib/hooks/useJobPoller';
 
 interface ExtractedNode {
     id: string;
@@ -21,7 +21,7 @@ interface IngestionResult {
 }
 
 type SourceType = 'youtube' | 'podcast' | 'twitter' | 'url' | 'file' | 'unknown';
-type IngestionStage = 'idle' | 'detecting' | 'ingesting' | 'extracting' | 'complete' | 'error';
+type IngestionStage = 'idle' | 'detecting' | 'ingesting' | 'polling' | 'extracting' | 'complete' | 'error';
 
 interface UnifiedIngestionProps {
     twinId: string;
@@ -58,6 +58,15 @@ const sourceConfig: Record<SourceType, { icon: string; color: string; label: str
     unknown: { icon: '❓', color: 'gray', label: 'Unknown', endpoint: '' },
 };
 
+// Polling stage progress mapping
+const POLLING_PROGRESS = {
+    queued: 30,
+    processing: 50,
+    complete: 75,
+    failed: 0,
+    needs_attention: 40,
+};
+
 export default function UnifiedIngestion({ twinId, onComplete, onError }: UnifiedIngestionProps) {
     const supabase = getSupabaseClient();
     const [input, setInput] = useState('');
@@ -68,13 +77,77 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
     const [extractedNodes, setExtractedNodes] = useState<ExtractedNode[]>([]);
     const [error, setError] = useState<string | null>(null);
     const [dragActive, setDragActive] = useState(false);
+    const [currentJobId, setCurrentJobId] = useState<string | null>(null);
+    const [currentSourceId, setCurrentSourceId] = useState<string | null>(null);
     const fileInputRef = React.useRef<HTMLInputElement>(null);
 
     // Get auth token
     const getAuthToken = useCallback(async () => {
         const { data: { session } } = await supabase.auth.getSession();
-        return session?.access_token;
+        return session?.access_token || null;
     }, [supabase]);
+
+    // Job poller for URL ingestion
+    const [token, setToken] = useState<string | null>(null);
+    const { 
+        job, 
+        isPolling, 
+        error: pollError, 
+        isComplete, 
+        isSuccessful,
+        startPolling,
+        stopPolling,
+        retryJob,
+    } = useJobPoller({
+        jobId: currentJobId,
+        token,
+        debug: process.env.NODE_ENV === 'development',
+    });
+
+    // Update token on mount
+    useEffect(() => {
+        getAuthToken().then(setToken);
+    }, [getAuthToken]);
+
+    // Handle job status changes
+    useEffect(() => {
+        if (!job) return;
+
+        // Update progress based on job status
+        const jobProgress = POLLING_PROGRESS[job.status] || 30;
+        setProgress(jobProgress);
+        
+        // Update status text
+        const statusMessages: Record<string, string> = {
+            queued: `Queued for processing...`,
+            processing: `Processing content (${job.metadata?.provider || detectedType})...`,
+            complete: `Processing complete! Extracting knowledge...`,
+            failed: `Processing failed: ${job.error_message || 'Unknown error'}`,
+            needs_attention: `Processing needs attention...`,
+        };
+        setStatusText(statusMessages[job.status] || `Status: ${job.status}`);
+
+        // When job completes, trigger extraction
+        if (isComplete) {
+            if (isSuccessful && currentSourceId) {
+                setStage('extracting');
+                extractNodes(currentSourceId);
+            } else {
+                setStage('error');
+                setError(job?.error_message || 'Job processing failed');
+                onError?.(job?.error_message || 'Job processing failed');
+            }
+        }
+    }, [job, isComplete, isSuccessful, currentSourceId, detectedType, onError]);
+
+    // Handle polling errors
+    useEffect(() => {
+        if (pollError) {
+            setError(pollError);
+            setStage('error');
+            onError?.(pollError);
+        }
+    }, [pollError, onError]);
 
     const resetState = () => {
         setInput('');
@@ -82,7 +155,63 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
         setStage('idle');
         setProgress(0);
         setExtractedNodes([]);
+        setCurrentJobId(null);
+        setCurrentSourceId(null);
+        setError(null);
+        stopPolling();
         if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+
+    // Extract nodes from processed source
+    const extractNodes = async (sourceId: string) => {
+        if (!token) return;
+
+        try {
+            setStage('extracting');
+            setProgress(80);
+
+            const extractResponse = await fetch(
+                `${API_BASE_URL}${API_ENDPOINTS.INGEST_EXTRACT_NODES(sourceId)}`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ max_chunks: 5 }),
+                }
+            );
+
+            if (extractResponse.ok) {
+                const extractResult = await extractResponse.json();
+                setExtractedNodes(extractResult.nodes || []);
+                setProgress(100);
+                setStatusText(`Done! ${extractResult.nodes_created || 0} nodes, ${extractResult.edges_created || 0} edges extracted`);
+                setStage('complete');
+
+                onComplete?.({
+                    source_id: sourceId,
+                    status: 'complete',
+                    nodes_created: extractResult.nodes_created,
+                    edges_created: extractResult.edges_created,
+                });
+            } else {
+                // Extraction failed but ingestion succeeded
+                setProgress(100);
+                setStatusText('Content saved (extraction pending)');
+                setStage('complete');
+                onComplete?.({ source_id: sourceId, status: 'live' });
+            }
+
+            // Reset input after success
+            setTimeout(() => {
+                resetState();
+            }, 3000);
+        } catch (err: any) {
+            setError(err.message || 'Extraction failed');
+            setStage('error');
+            onError?.(err.message);
+        }
     };
 
     // Handle input change with auto-detection
@@ -97,28 +226,29 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
         }
     };
 
-    // Main ingestion flow
+    // Main URL ingestion flow with polling
     const handleIngest = async () => {
         if (!input.trim() || detectedType === 'unknown') return;
 
-        const token = await getAuthToken();
-        if (!token) {
+        const currentToken = await getAuthToken();
+        if (!currentToken) {
             setError('Not authenticated');
             return;
         }
+        setToken(currentToken);
 
         setStage('ingesting');
         setProgress(20);
-        setStatusText(`Fetching ${sourceConfig[detectedType].label}...`);
+        setStatusText(`Submitting ${sourceConfig[detectedType].label}...`);
         setExtractedNodes([]);
 
         try {
-            // Step 1: Ingest content
-            const endpoint = `${API_BASE_URL}${sourceConfig[detectedType].endpoint}/${twinId}`;  // Already has leading slash
+            // Step 1: Submit ingestion request
+            const endpoint = `${API_BASE_URL}${sourceConfig[detectedType].endpoint}/${twinId}`;
             const response = await fetch(endpoint, {
                 method: 'POST',
                 headers: {
-                    'Authorization': `Bearer ${token}`,
+                    'Authorization': `Bearer ${currentToken}`,
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({ url: input.trim() }),
@@ -130,47 +260,14 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
             }
 
             const result = await response.json();
-            setProgress(50);
-            setStatusText('Content ingested. Extracting knowledge...');
-            setStage('extracting');
-
-            // Step 2: Extract nodes from the source
-            const extractResponse = await fetch(`${API_BASE_URL}${API_ENDPOINTS.INGEST_EXTRACT_NODES(result.source_id)}`, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ max_chunks: 5 }),
-            });
-
-            setProgress(80);
-
-            if (extractResponse.ok) {
-                const extractResult = await extractResponse.json();
-                setExtractedNodes(extractResult.nodes || []);
-                setProgress(100);
-                setStatusText(`Done! ${extractResult.nodes_created || 0} nodes, ${extractResult.edges_created || 0} edges`);
-                setStage('complete');
-
-                onComplete?.({
-                    source_id: result.source_id,
-                    status: 'complete',
-                    nodes_created: extractResult.nodes_created,
-                    edges_created: extractResult.edges_created,
-                });
-            } else {
-                // Extraction failed but ingestion succeeded
-                setProgress(100);
-                setStatusText('Content saved (extraction pending)');
-                setStage('complete');
-                onComplete?.({ source_id: result.source_id, status: 'live' });
-            }
-
-            // Reset input after success
-            setTimeout(() => {
-                resetState();
-            }, 3000);
+            setCurrentJobId(result.job_id);
+            setCurrentSourceId(result.source_id);
+            
+            // Step 2: Start polling for job completion
+            setStage('polling');
+            setProgress(30);
+            setStatusText('Waiting for processing to complete...');
+            startPolling(result.job_id);
 
         } catch (err: any) {
             setError(err.message || 'Something went wrong');
@@ -183,8 +280,8 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
         const file = e.target.files?.[0];
         if (!file) return;
 
-        const token = await getAuthToken();
-        if (!token) {
+        const currentToken = await getAuthToken();
+        if (!currentToken) {
             setError('Not authenticated');
             return;
         }
@@ -204,7 +301,7 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
         try {
             const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.INGEST_FILE(twinId)}`, {
                 method: 'POST',
-                headers: { 'Authorization': `Bearer ${token}` },
+                headers: { 'Authorization': `Bearer ${currentToken}` },
                 body: formData,
                 signal: controller.signal,
             });
@@ -217,19 +314,40 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
             }
 
             const result = await response.json();
-            setProgress(100);
-            setStatusText('File uploaded and indexed!');
-            setStage('complete');
-            onComplete?.({ source_id: result.source_id, status: 'live' });
-
-            setTimeout(() => {
-                resetState();
-            }, 2000);
+            
+            // Handle duplicate detection
+            if (result.duplicate) {
+                setProgress(100);
+                setStatusText(result.message || 'File already exists');
+                setStage('complete');
+                onComplete?.({ source_id: result.source_id, status: result.status });
+                
+                setTimeout(() => resetState(), 2000);
+                return;
+            }
+            
+            // For files, processing is synchronous in the endpoint
+            // But we still poll to ensure indexing is complete
+            if (result.job_id) {
+                setCurrentJobId(result.job_id);
+                setCurrentSourceId(result.source_id);
+                setToken(currentToken);
+                setStage('polling');
+                startPolling(result.job_id);
+            } else {
+                // Fallback: direct extraction
+                setProgress(100);
+                setStatusText('File uploaded and indexed!');
+                setStage('complete');
+                onComplete?.({ source_id: result.source_id, status: 'live' });
+                
+                setTimeout(() => resetState(), 2000);
+            }
 
         } catch (err: any) {
             setError(err.message);
             setStage('error');
-            resetState(); // Reset on error too so user can try again
+            resetState();
         }
     };
 
@@ -241,8 +359,8 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
         const file = e.dataTransfer.files[0];
         if (!file) return;
 
-        const token = await getAuthToken();
-        if (!token) {
+        const currentToken = await getAuthToken();
+        if (!currentToken) {
             setError('Not authenticated');
             return;
         }
@@ -255,14 +373,13 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
         const formData = new FormData();
         formData.append('file', file);
 
-        // 3-minute timeout for large files
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 180000);
 
         try {
             const response = await fetch(`${API_BASE_URL}/ingest/file/${twinId}`, {
                 method: 'POST',
-                headers: { 'Authorization': `Bearer ${token}` },
+                headers: { 'Authorization': `Bearer ${currentToken}` },
                 body: formData,
                 signal: controller.signal,
             });
@@ -275,16 +392,33 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
             }
 
             const result = await response.json();
-            setProgress(100);
-            setStatusText('File uploaded and indexed!');
-            setStage('complete');
-            onComplete?.({ source_id: result.source_id, status: 'live' });
-
-            setTimeout(() => {
-                setStage('idle');
-                setProgress(0);
-                setDetectedType('unknown');
-            }, 2000);
+            
+            // Handle duplicate detection
+            if (result.duplicate) {
+                setProgress(100);
+                setStatusText(result.message || 'File already exists');
+                setStage('complete');
+                onComplete?.({ source_id: result.source_id, status: result.status });
+                
+                setTimeout(() => resetState(), 2000);
+                return;
+            }
+            
+            // For files, poll if job_id returned
+            if (result.job_id) {
+                setCurrentJobId(result.job_id);
+                setCurrentSourceId(result.source_id);
+                setToken(currentToken);
+                setStage('polling');
+                startPolling(result.job_id);
+            } else {
+                setProgress(100);
+                setStatusText('File uploaded and indexed!');
+                setStage('complete');
+                onComplete?.({ source_id: result.source_id, status: 'live' });
+                
+                setTimeout(() => resetState(), 2000);
+            }
 
         } catch (err: any) {
             setError(err.message);
@@ -292,8 +426,27 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
         }
     };
 
+    // Cancel ongoing ingestion
+    const handleCancel = () => {
+        stopPolling();
+        resetState();
+    };
+
+    // Retry failed job
+    const handleRetry = async () => {
+        if (currentJobId) {
+            setStage('polling');
+            setError(null);
+            const success = await retryJob();
+            if (!success) {
+                setError('Failed to retry job');
+                setStage('error');
+            }
+        }
+    };
+
     const config = sourceConfig[detectedType];
-    const isProcessing = stage === 'ingesting' || stage === 'extracting' || stage === 'detecting';
+    const isProcessing = stage === 'ingesting' || stage === 'polling' || stage === 'extracting' || stage === 'detecting';
 
     return (
         <div className="bg-white rounded-[2rem] border border-slate-200 shadow-sm overflow-hidden">
@@ -364,7 +517,7 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
                         {isProcessing ? (
                             <span className="flex items-center gap-2">
                                 <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
-                                Processing
+                                {stage === 'polling' ? 'Waiting...' : 'Processing'}
                             </span>
                         ) : (
                             'Add'
@@ -393,16 +546,36 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
             </div>
 
             {/* Progress Section */}
-            {(isProcessing || stage === 'complete') && (
+            {(isProcessing || stage === 'complete' || stage === 'error') && (
                 <div className="px-6 pb-6">
                     {/* Progress bar */}
                     <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
                         <div
-                            className={`h-full transition-all duration-500 ${stage === 'complete' ? 'bg-green-500' : 'bg-indigo-500'}`}
+                            className={`h-full transition-all duration-500 ${stage === 'complete' ? 'bg-green-500' : stage === 'error' ? 'bg-red-500' : 'bg-indigo-500'}`}
                             style={{ width: `${progress}%` }}
                         />
                     </div>
-                    <p className="text-xs font-bold text-slate-500 mt-2">{statusText}</p>
+                    <div className="flex items-center justify-between mt-2">
+                        <p className="text-xs font-bold text-slate-500">{statusText}</p>
+                        {isPolling && (
+                            <button
+                                onClick={handleCancel}
+                                className="text-xs text-slate-400 hover:text-slate-600 underline"
+                            >
+                                Cancel
+                            </button>
+                        )}
+                    </div>
+                    
+                    {/* Job status details */}
+                    {stage === 'polling' && job && (
+                        <div className="mt-2 text-xs text-slate-400">
+                            Status: <span className="capitalize">{job.status}</span>
+                            {job.metadata?.chunks_created && (
+                                <span className="ml-2">• {job.metadata.chunks_created} chunks indexed</span>
+                            )}
+                        </div>
+                    )}
                 </div>
             )}
 
@@ -431,15 +604,27 @@ export default function UnifiedIngestion({ twinId, onComplete, onError }: Unifie
             {/* Error display */}
             {error && (
                 <div className="px-6 pb-6">
-                    <div className="p-4 bg-red-50 border border-red-100 rounded-xl text-red-600 text-sm font-medium flex items-center gap-3">
-                        <span className="text-lg">⚠️</span>
-                        {error}
-                        <button
-                            onClick={() => { setError(null); setStage('idle'); }}
-                            className="ml-auto text-red-400 hover:text-red-600"
-                        >
-                            ✕
-                        </button>
+                    <div className="p-4 bg-red-50 border border-red-100 rounded-xl text-red-600 text-sm font-medium">
+                        <div className="flex items-center gap-3">
+                            <span className="text-lg">⚠️</span>
+                            <span className="flex-1">{error}</span>
+                        </div>
+                        {currentJobId && stage === 'error' && (
+                            <div className="mt-3 flex gap-2">
+                                <button
+                                    onClick={handleRetry}
+                                    className="px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-xs font-bold hover:bg-red-200"
+                                >
+                                    Retry Job
+                                </button>
+                                <button
+                                    onClick={() => { setError(null); setStage('idle'); }}
+                                    className="px-3 py-1.5 text-red-400 hover:text-red-600 text-xs"
+                                >
+                                    Dismiss
+                                </button>
+                            </div>
+                        )}
                     </div>
                 </div>
             )}

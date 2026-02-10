@@ -141,115 +141,141 @@ async def ingest_file_endpoint(
         twin_id: Owner twin ID
         file: The file to upload
         Note: uploads are auto-indexed.
+    
+    Deduplication:
+        - Content hash (SHA-256) is calculated after text extraction
+        - If identical content exists for this twin, returns existing source
+        - Prevents duplicate vectors and wasted processing
     """
     # SECURITY: Verify user owns this twin before ingesting content
     verify_twin_ownership(twin_id, user)
+    
+    temp_file_path = None
     try:
-        source_id = str(uuid.uuid4())
         provider = "file"
         corr = _get_correlation_id(http_req) if http_req else None
-
-        # Create source row first (required for FK references + UI visibility)
+        filename = file.filename or "upload"
+        file_extension = os.path.splitext(filename)[1]
+        
+        # Step 1: Save uploaded file temporarily for extraction
+        temp_dir = "temp_uploads"
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_filename = f"temp_{uuid.uuid4()}{file_extension}"
+        temp_file_path = os.path.join(temp_dir, temp_filename)
+        
+        content = await file.read()
+        with open(temp_file_path, "wb") as f:
+            f.write(content)
+        
+        # Step 2: Extract text
+        text = ""
+        try:
+            if temp_file_path.endswith(".pdf"):
+                text = extract_text_from_pdf(temp_file_path)
+            elif temp_file_path.endswith(".docx"):
+                text = extract_text_from_docx(temp_file_path)
+            elif temp_file_path.endswith(".xlsx"):
+                text = extract_text_from_excel(temp_file_path)
+            else:
+                with open(temp_file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+        except Exception as extract_error:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Failed to extract text from file: {str(extract_error)}"
+            )
+        
+        if not text or len(text.strip()) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="File uploaded but no text could be extracted. Try a different file or export as PDF with selectable text."
+            )
+        
+        # Step 3: Calculate content hash for deduplication
+        content_hash = calculate_content_hash(text)
+        
+        # Step 4: Check for existing duplicate by content hash
+        existing_source = supabase.table("sources").select("id, status, content_hash") \
+            .eq("twin_id", twin_id) \
+            .eq("content_hash", content_hash) \
+            .execute()
+        
+        if existing_source.data and len(existing_source.data) > 0:
+            # Duplicate detected - clean up and return existing
+            existing = existing_source.data[0]
+            
+            # Log deduplication event
+            log_ingestion_event(
+                existing["id"], 
+                twin_id, 
+                "info", 
+                f"Duplicate file detected by hash. Returning existing source.",
+                metadata={"original_filename": filename, "existing_source_id": existing["id"]}
+            )
+            
+            return {
+                "source_id": existing["id"],
+                "job_id": None,
+                "status": existing.get("status", "live"),
+                "duplicate": True,
+                "message": "This file has already been uploaded. Returning existing source."
+            }
+        
+        # Step 5: No duplicate - create new source
+        source_id = str(uuid.uuid4())
+        
         supabase.table("sources").insert({
             "id": source_id,
             "twin_id": twin_id,
-            "filename": file.filename or "upload",
-            "file_size": 0,
-            "content_text": "",
-            "status": "pending",
+            "filename": filename,
+            "file_size": len(content),
+            "content_text": text,
+            "content_hash": content_hash,
+            "status": "processing",
             "staging_status": "staged",
             "health_status": "healthy",
+            "extracted_text_length": len(text),
         }).execute()
-
+        
+        # Log creation event
         ev_q = start_step(source_id=source_id, twin_id=twin_id, provider=provider, step="queued", correlation_id=corr)
         finish_step(event_id=ev_q, source_id=source_id, twin_id=twin_id, provider=provider, step="queued", status="completed", correlation_id=corr)
-
-        # Save uploaded file temporarily for extraction (durable storage is out of scope)
-        temp_dir = "temp_uploads"
-        os.makedirs(temp_dir, exist_ok=True)
-        file_extension = os.path.splitext(file.filename)[1] if file.filename else ""
-        temp_filename = f"{source_id}{file_extension}"
-        file_path = os.path.join(temp_dir, temp_filename)
-
+        
+        # Run health checks
         ev_p = start_step(source_id=source_id, twin_id=twin_id, provider=provider, step="parsed", correlation_id=corr)
-        try:
-            with open(file_path, "wb") as f:
-                content = await file.read()
-                f.write(content)
-
-            # Extract text (sync for PDFs/docx/xlsx; avoids long request times from embedding/indexing)
-            text = ""
-            if file_path.endswith(".pdf"):
-                text = extract_text_from_pdf(file_path)
-            elif file_path.endswith(".docx"):
-                text = extract_text_from_docx(file_path)
-            elif file_path.endswith(".xlsx"):
-                text = extract_text_from_excel(file_path)
-            else:
-                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    text = f.read()
-
-            if not text or len(text.strip()) == 0:
-                err = build_error(
-                    code="FILE_EXTRACTION_EMPTY",
-                    message="File uploaded but no text could be extracted. Try a different file or export as PDF with selectable text.",
-                    provider=provider,
-                    step="parsed",
-                    correlation_id=corr,
-                    raw={"filename": file.filename, "ext": file_extension},
-                )
-                finish_step(event_id=ev_p, source_id=source_id, twin_id=twin_id, provider=provider, step="parsed", status="error", correlation_id=corr, error=err)
-                raise HTTPException(status_code=400, detail=err["message"])
-
-            content_hash = calculate_content_hash(text)
-
-            supabase.table("sources").update({
-                "file_size": len(content),
-                "content_text": text,
-                "content_hash": content_hash,
-                "extracted_text_length": len(text),
-                "status": "processing",
-            }).eq("id", source_id).eq("twin_id", twin_id).execute()
-
-            # Health checks are cheap and improve debuggability.
-            health = run_all_health_checks(
-                source_id,
-                twin_id,
-                text,
-                source_data={"filename": file.filename or "upload", "twin_id": twin_id}
-            )
-            supabase.table("sources").update({
-                "health_status": health.get("overall_status", "healthy")
-            }).eq("id", source_id).execute()
-
-            finish_step(event_id=ev_p, source_id=source_id, twin_id=twin_id, provider=provider, step="parsed", status="completed", correlation_id=corr, metadata={"text_len": len(text)})
-        except HTTPException:
-            raise
-        except Exception as e:
-            err = build_error(
-                code="FILE_EXTRACTION_FAILED",
-                message=f"Failed to extract text from file: {str(e)}",
-                provider=provider,
-                step="parsed",
-                correlation_id=corr,
-                raw={"filename": file.filename, "ext": file_extension},
-                exc=e,
-            )
-            finish_step(event_id=ev_p, source_id=source_id, twin_id=twin_id, provider=provider, step="parsed", status="error", correlation_id=corr, error=err)
-            raise HTTPException(status_code=400, detail=err["message"])
-        finally:
-            if os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
-
+        health = run_all_health_checks(
+            source_id,
+            twin_id,
+            text,
+            source_data={"filename": filename, "twin_id": twin_id}
+        )
+        supabase.table("sources").update({
+            "health_status": health.get("overall_status", "healthy")
+        }).eq("id", source_id).execute()
+        
+        finish_step(event_id=ev_p, source_id=source_id, twin_id=twin_id, provider=provider, step="parsed", status="completed", correlation_id=corr, metadata={"text_len": len(text)})
+        
+        # Queue for indexing
         job_id = _queue_ingestion_job(source_id=source_id, twin_id=twin_id, provider=provider, url=None, correlation_id=corr)
-        return {"source_id": source_id, "job_id": job_id, "status": "processing"}
+        
+        return {
+            "source_id": source_id,
+            "job_id": job_id,
+            "status": "processing",
+            "duplicate": False
+        }
+        
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        # Clean up temp file
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except Exception:
+                pass
 
 @router.post("/ingest/url/{twin_id}")
 async def ingest_url_endpoint(twin_id: str, request: URLIngestRequest, http_req: Request, user=Depends(verify_owner)):

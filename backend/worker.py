@@ -7,6 +7,62 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+def validate_worker_environment():
+    """
+    Validate critical environment variables at startup.
+    Fail fast if required variables are missing.
+    """
+    required_vars = [
+        ("SUPABASE_URL", "Database connection"),
+        ("SUPABASE_SERVICE_KEY", "Database authentication"),
+        ("OPENAI_API_KEY", "OpenAI API for embeddings and LLM"),
+        ("PINECONE_API_KEY", "Pinecone vector search"),
+        ("PINECONE_INDEX_NAME", "Pinecone index name"),
+    ]
+    
+    optional_vars = [
+        ("REDIS_URL", "Redis queue (falls back to DB polling if missing)"),
+        ("DATABASE_URL", "LangGraph checkpointer (optional)"),
+    ]
+    
+    missing = []
+    for var, description in required_vars:
+        value = os.getenv(var)
+        if not value:
+            missing.append(f"  - {var}: {description}")
+    
+    if missing:
+        print("=" * 70)
+        print("FATAL: Worker missing required environment variables:")
+        for m in missing:
+            print(m)
+        print("=" * 70)
+        print("\nPlease set these variables in your worker environment.")
+        print("For Render: Check your Background Worker service environment variables.")
+        print("For local: Create a .env file with these variables.")
+        sys.exit(1)
+    
+    # Warn about optional variables
+    for var, description in optional_vars:
+        if not os.getenv(var):
+            print(f"[WARN] {var} not set: {description}")
+    
+    # Validate Supabase connection format
+    supabase_url = os.getenv("SUPABASE_URL", "")
+    if not supabase_url.startswith("https://"):
+        print(f"[WARN] SUPABASE_URL should start with https://, got: {supabase_url[:30]}...")
+    
+    # Validate OpenAI key format
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    if not openai_key.startswith("sk-"):
+        print(f"[WARN] OPENAI_API_KEY should start with 'sk-', check your key format")
+    
+    print("[OK] Worker environment validation passed")
+    return True
+
+# Run validation before importing modules that depend on env vars
+validate_worker_environment()
+
 from modules.job_queue import dequeue_job, get_redis_client, get_queue_length
 from modules._core.scribe_engine import process_graph_extraction_job, process_content_extraction_job
 from modules.persona_feedback_learning_jobs import process_feedback_learning_job
@@ -77,8 +133,9 @@ async def worker_loop():
                     elif job_type == "feedback_learning":
                         success = await process_feedback_learning_job(job_id)
                     elif job_type in ["ingestion", "reindex", "health_check"]:
-                        # Training jobs (legacy/ingestion module)
-                        success = await process_training_job(job_id)
+                        # Training jobs with automatic retry logic
+                        from modules.training_jobs import process_training_job_with_retry
+                        success = await process_training_job_with_retry(job_id)
                     else:
                         print(f"[Worker] Unknown job type: {job_type}")
                         success = False

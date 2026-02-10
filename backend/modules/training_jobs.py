@@ -449,3 +449,273 @@ async def process_training_queue(twin_ids: list) -> Dict[str, Any]:
         "remaining": remaining,
         "errors": errors
     }
+
+
+# =============================================================================
+# Dead Letter Queue & Retry Logic
+# =============================================================================
+
+MAX_RETRY_ATTEMPTS = 3  # Maximum number of retry attempts before DLQ
+RETRY_DELAY_BASE_SECONDS = 30  # Base delay for exponential backoff
+
+
+def should_retry_job(job: Dict[str, Any], error_message: str) -> bool:
+    """
+    Determine if a failed job should be retried based on error type and attempt count.
+    
+    Args:
+        job: The failed job record
+        error_message: The error message from the failure
+        
+    Returns:
+        True if job should be retried, False to send to DLQ
+    """
+    retry_count = job.get("retry_count", 0)
+    
+    # Don't retry if max attempts reached
+    if retry_count >= MAX_RETRY_ATTEMPTS:
+        print(f"[Retry] Job {job['id']} exceeded max retries ({MAX_RETRY_ATTEMPTS}), sending to DLQ")
+        return False
+    
+    # Non-retryable error patterns
+    non_retryable_patterns = [
+        "YOUTUBE_TRANSCRIPT_UNAVAILABLE",
+        "X_BLOCKED_OR_UNSUPPORTED", 
+        "LINKEDIN_BLOCKED_OR_REQUIRES_AUTH",
+        "FILE_EXTRACTION_EMPTY",
+        "FILE_EXTRACTION_FAILED",
+        "Invalid YouTube URL",
+        "No text extracted",
+        "not available in your region",
+        "requires authentication",
+        "deleted, private, or not found",
+    ]
+    
+    error_lower = error_message.lower()
+    for pattern in non_retryable_patterns:
+        if pattern.lower() in error_lower:
+            print(f"[Retry] Job {job['id']} has non-retryable error pattern '{pattern}', sending to DLQ")
+            return False
+    
+    return True
+
+
+def calculate_retry_delay(retry_count: int) -> int:
+    """
+    Calculate delay for retry using exponential backoff with jitter.
+    
+    Args:
+        retry_count: Current retry attempt (0-indexed)
+        
+    Returns:
+        Delay in seconds
+    """
+    import random
+    
+    # Exponential backoff: 30s, 60s, 120s
+    base_delay = RETRY_DELAY_BASE_SECONDS * (2 ** retry_count)
+    
+    # Add jitter (±25%) to prevent thundering herd
+    jitter = random.uniform(0.75, 1.25)
+    delay = int(base_delay * jitter)
+    
+    # Cap at 5 minutes
+    return min(delay, 300)
+
+
+def retry_training_job_with_backoff(job_id: str) -> bool:
+    """
+    Retry a failed training job with exponential backoff.
+    
+    Args:
+        job_id: Job UUID to retry
+        
+    Returns:
+        True if job was successfully re-queued, False otherwise
+    """
+    try:
+        job = get_training_job(job_id)
+        if not job:
+            print(f"[Retry] Job {job_id} not found")
+            return False
+        
+        # Check if job is in a retryable state
+        if job.get("status") not in ["failed", "needs_attention"]:
+            print(f"[Retry] Job {job_id} is not in failed state (status: {job.get('status')})")
+            return False
+        
+        # Check retry eligibility
+        error_message = job.get("error_message", "")
+        if not should_retry_job(job, error_message):
+            # Move to DLQ state (permanent failure)
+            update_job_status(job_id, "dead_letter", 
+                error_message=f"PERMANENT FAILURE: {error_message}")
+            return False
+        
+        # Increment retry count
+        current_retry = job.get("retry_count", 0)
+        new_retry_count = current_retry + 1
+        delay_seconds = calculate_retry_delay(current_retry)
+        
+        # Calculate next attempt time
+        from datetime import datetime, timedelta
+        next_attempt_at = (datetime.utcnow() + timedelta(seconds=delay_seconds)).isoformat()
+        
+        # Update job for retry
+        update_data = {
+            "status": "queued",
+            "retry_count": new_retry_count,
+            "error_message": None,  # Clear error message
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        
+        # Update metadata with retry info
+        metadata = job.get("metadata", {})
+        metadata["retry_history"] = metadata.get("retry_history", []) + [{
+            "attempt": new_retry_count,
+            "previous_error": error_message[:500],  # Truncate long errors
+            "retried_at": datetime.utcnow().isoformat(),
+            "next_attempt_delay_seconds": delay_seconds,
+        }]
+        metadata["next_attempt_after"] = next_attempt_at
+        update_data["metadata"] = metadata
+        
+        # Clear completed_at since we're retrying
+        update_data["completed_at"] = None
+        
+        supabase.table("training_jobs").update(update_data).eq("id", job_id).execute()
+        
+        # Re-queue with delay (if Redis supports delayed queues) or immediate
+        # For now, we rely on the next_attempt_after metadata for filtering
+        enqueue_job(job_id, job.get("job_type", "ingestion"), job.get("priority", 0), metadata)
+        
+        print(f"[Retry] Job {job_id} re-queued for attempt {new_retry_count}/{MAX_RETRY_ATTEMPTS} "
+              f"(delay: {delay_seconds}s)")
+        return True
+        
+    except Exception as e:
+        print(f"[Retry] Error retrying job {job_id}: {e}")
+        return False
+
+
+def get_jobs_pending_retry() -> List[Dict[str, Any]]:
+    """
+    Get jobs that are queued but waiting for their retry delay to pass.
+    
+    Returns:
+        List of jobs ready to be processed
+    """
+    try:
+        from datetime import datetime
+        now = datetime.utcnow().isoformat()
+        
+        # Get queued jobs where next_attempt_after has passed or is null
+        response = supabase.table("training_jobs") \
+            .select("*") \
+            .eq("status", "queued") \
+            .or_(f"metadata->>next_attempt_after.is.null,metadata->>next_attempt_after.lte.{now}") \
+            .order("priority", desc=True) \
+            .order("created_at", desc=False) \
+            .limit(50) \
+            .execute()
+        
+        return response.data or []
+    except Exception as e:
+        print(f"[Retry] Error fetching jobs pending retry: {e}")
+        return []
+
+
+def get_dead_letter_jobs(twin_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    """
+    Get jobs that have exceeded max retries and are in dead letter state.
+    
+    Args:
+        twin_id: Optional twin filter
+        limit: Maximum results
+        
+    Returns:
+        List of dead letter jobs
+    """
+    try:
+        query = supabase.table("training_jobs") \
+            .select("*") \
+            .eq("status", "dead_letter")
+        
+        if twin_id:
+            query = query.eq("twin_id", twin_id)
+        
+        response = query.order("updated_at", desc=True).limit(limit).execute()
+        return response.data or []
+    except Exception as e:
+        print(f"[DLQ] Error fetching dead letter jobs: {e}")
+        return []
+
+
+def replay_dead_letter_job(job_id: str) -> bool:
+    """
+    Manually replay a job from the dead letter queue.
+    Resets retry count and re-queues for processing.
+    
+    Args:
+        job_id: Job UUID in dead letter state
+        
+    Returns:
+        True if successfully replayed
+    """
+    try:
+        job = get_training_job(job_id)
+        if not job or job.get("status") != "dead_letter":
+            print(f"[DLQ] Job {job_id} not found or not in dead_letter state")
+            return False
+        
+        # Reset for retry
+        from datetime import datetime
+        update_data = {
+            "status": "queued",
+            "retry_count": 0,  # Reset retry count
+            "error_message": None,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        
+        metadata = job.get("metadata", {})
+        metadata["replayed_from_dlq_at"] = datetime.utcnow().isoformat()
+        metadata["dlq_error"] = job.get("error_message")  # Preserve original error
+        update_data["metadata"] = metadata
+        
+        supabase.table("training_jobs").update(update_data).eq("id", job_id).execute()
+        
+        enqueue_job(job_id, job.get("job_type", "ingestion"), job.get("priority", 0), metadata)
+        
+        print(f"[DLQ] Job {job_id} replayed from dead letter queue")
+        return True
+        
+    except Exception as e:
+        print(f"[DLQ] Error replaying job {job_id}: {e}")
+        return False
+
+
+# Modify process_training_job to use retry logic
+def process_training_job_with_retry(job_id: str) -> bool:
+    """
+    Wrapper around process_training_job that handles automatic retries.
+    
+    Args:
+        job_id: Job UUID
+        
+    Returns:
+        True if job succeeded or was successfully queued for retry
+    """
+    from modules.training_jobs import process_training_job
+    
+    success = process_training_job(job_id)
+    
+    if not success:
+        # Try to retry with backoff
+        retry_queued = retry_training_job_with_backoff(job_id)
+        if retry_queued:
+            # Return True because we successfully queued for retry
+            # The job will be processed again later
+            return True
+        # If retry not queued, it went to DLQ - return False
+    
+    return success

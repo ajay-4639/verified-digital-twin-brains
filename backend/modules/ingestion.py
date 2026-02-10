@@ -1692,9 +1692,22 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[st
 async def analyze_chunk_content(text: str) -> dict:
     """
     Analyzes a chunk to generate synthetic questions, category (Fact/Opinion), and tone.
+    
+    SECURITY: Sanitizes input before sending to LLM to prevent prompt injection.
     """
+    from modules.llm_safety import sanitize_for_llm, PromptInjectionError
+    
     client = get_openai_client()
+    
     try:
+        # SECURITY FIX H3: Sanitize user content before LLM call
+        sanitized_result = sanitize_for_llm(text, strict_mode=False)  # Non-strict: warn but don't block
+        
+        if sanitized_result.warnings:
+            print(f"[LLM Safety] Warnings for chunk analysis: {sanitized_result.warnings}")
+        
+        safe_text = sanitized_result.sanitized_text
+        
         # Using gpt-4o-mini for better reasoning with JSON output
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -1708,11 +1721,16 @@ async def analyze_chunk_content(text: str) -> dict:
                     - 'stance': A short description of the owner's position.
                     - 'intensity': A score from 1-10 on how strongly this opinion is held.
                   If category is 'FACT', set 'opinion_map' to null."""},
-                {"role": "user", "content": text}
+                {"role": "user", "content": safe_text}
             ],
             response_format={ "type": "json_object" }
         )
         return json.loads(response.choices[0].message.content)
+        
+    except PromptInjectionError as e:
+        print(f"[LLM Safety] Prompt injection detected in chunk: {e}")
+        # Return safe defaults, don't process potentially malicious content
+        return {"questions": [], "category": "FACT", "tone": "Neutral", "opinion_map": None}
     except Exception as e:
         print(f"Error analyzing chunk: {e}")
         return {"questions": [], "category": "FACT", "tone": "Neutral", "opinion_map": None}

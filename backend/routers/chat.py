@@ -757,6 +757,34 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
             error_msg = f"Error: {str(e)}"
             print(f"[Chat] ERROR yielded in stream: {error_msg}")
             yield json.dumps({"type": "error", "error": error_msg}) + "\n"
+        
+        finally:
+            # =================================================================
+            # CRITICAL FIX H4: Proper cleanup on stream end or disconnect
+            # =================================================================
+            try:
+                # Flush Langfuse traces if they exist
+                if 'langfuse' in locals():
+                    try:
+                        langfuse.flush()
+                        print(f"[Chat] Langfuse traces flushed for conversation {conversation_id}")
+                    except Exception as flush_err:
+                        print(f"[Chat] Langfuse flush error (non-critical): {flush_err}")
+                
+                # Clean up large objects to free memory
+                if 'raw_history' in locals():
+                    raw_history.clear()
+                if 'langchain_history' in locals():
+                    langchain_history.clear()
+                
+                # Force garbage collection for large responses
+                import gc
+                gc.collect()
+                
+                print(f"[Chat] Stream cleanup completed for conversation {conversation_id}")
+                
+            except Exception as cleanup_err:
+                print(f"[Chat] Cleanup error (non-critical): {cleanup_err}")
 
     return StreamingResponse(stream_generator(), media_type="text/event-stream")
 

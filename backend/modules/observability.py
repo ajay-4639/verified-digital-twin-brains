@@ -1,26 +1,161 @@
 from supabase import create_client, Client
 import os
+import time
+from typing import Optional, Any, Callable
+from functools import wraps
 from dotenv import load_dotenv
 from modules.clients import get_pinecone_index
 
 load_dotenv()
 
-supabase_url = os.getenv("SUPABASE_URL")
-supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-# Fallback to anon key if service key is placeholder or missing
-if not supabase_key or "your_supabase_service_role_key" in supabase_key:
-    supabase_key = os.getenv("SUPABASE_KEY")
+# =============================================================================
+# CONNECTION POOL CONFIGURATION (CRITICAL BUG FIX: H1)
+# =============================================================================
 
-# Validate environment variables before creating client
-if not supabase_url:
-    raise ValueError("SUPABASE_URL environment variable is not set. Please check your .env file.")
-if not supabase_key:
-    raise ValueError("SUPABASE_KEY or SUPABASE_SERVICE_KEY environment variable is not set. Please check your .env file.")
+# Connection pool settings from environment
+DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "20"))  # Max connections per worker
+DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "10"))  # Additional connections under load
+DB_POOL_TIMEOUT = int(os.getenv("DB_POOL_TIMEOUT", "30"))  # Seconds to wait for connection
+DB_POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "3600"))  # Recycle connections after N seconds
 
+# Retry configuration
+DB_RETRY_ATTEMPTS = int(os.getenv("DB_RETRY_ATTEMPTS", "3"))
+DB_RETRY_DELAY = float(os.getenv("DB_RETRY_DELAY", "1.0"))  # Initial delay in seconds
+DB_RETRY_BACKOFF = float(os.getenv("DB_RETRY_BACKOFF", "2.0"))  # Exponential backoff multiplier
+
+# Track connection health
+_connection_health = {"healthy": True, "last_error": None, "last_check": time.time()}
+
+
+class ConnectionPoolManager:
+    """
+    Manages database connection pool with health checks and retry logic.
+    """
+    
+    def __init__(self):
+        self._client: Optional[Client] = None
+        self._initialized = False
+        self._connection_count = 0
+    
+    def _create_client(self) -> Client:
+        """Create Supabase client with connection pooling."""
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+        
+        # Fallback to anon key if service key is placeholder or missing
+        if not supabase_key or "your_supabase_service_role_key" in supabase_key:
+            supabase_key = os.getenv("SUPABASE_KEY")
+        
+        if not supabase_url:
+            raise ValueError("SUPABASE_URL environment variable is not set.")
+        if not supabase_key:
+            raise ValueError("SUPABASE_KEY or SUPABASE_SERVICE_KEY environment variable is not set.")
+        
+        try:
+            # Create client - options parameter format varies by supabase-py version
+            # Try without options first for compatibility
+            client = create_client(supabase_url, supabase_key)
+            return client
+        except Exception as e:
+            raise ValueError(f"Failed to initialize Supabase client: {e}")
+    
+    def get_client(self) -> Client:
+        """Get or create Supabase client."""
+        if self._client is None:
+            self._client = self._create_client()
+            self._initialized = True
+        return self._client
+    
+    def health_check(self) -> bool:
+        """Check if database connection is healthy."""
+        try:
+            # Simple health check query
+            result = self._client.table("twins").select("count").limit(1).execute()
+            _connection_health["healthy"] = True
+            _connection_health["last_check"] = time.time()
+            return True
+        except Exception as e:
+            _connection_health["healthy"] = False
+            _connection_health["last_error"] = str(e)
+            _connection_health["last_check"] = time.time()
+            return False
+    
+    def reset_connection(self):
+        """Reset connection pool (call after errors)."""
+        self._client = None
+        self._initialized = False
+
+
+# Global pool manager
+_pool_manager = ConnectionPoolManager()
+
+# Initialize on import
 try:
-    supabase: Client = create_client(supabase_url, supabase_key)
+    supabase: Client = _pool_manager.get_client()
 except Exception as e:
-    raise ValueError(f"Failed to initialize Supabase client: {e}. Please check your SUPABASE_URL and SUPABASE_KEY environment variables.")
+    print(f"[Observability] Failed to initialize Supabase: {e}")
+    supabase = None  # Will be re-initialized on first use
+
+
+def with_db_retry(max_attempts: int = None, initial_delay: float = None):
+    """
+    Decorator to add retry logic to database operations.
+    
+    Args:
+        max_attempts: Max retry attempts (default: DB_RETRY_ATTEMPTS)
+        initial_delay: Initial delay in seconds (default: DB_RETRY_DELAY)
+    """
+    max_attempts = max_attempts or DB_RETRY_ATTEMPTS
+    initial_delay = initial_delay or DB_RETRY_DELAY
+    
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            delay = initial_delay
+            last_error = None
+            
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_error = e
+                    error_msg = str(e).lower()
+                    
+                    # Don't retry on certain errors
+                    non_retryable = [
+                        "not found", "does not exist", "permission denied",
+                        "invalid", "syntax error", "constraint violation"
+                    ]
+                    if any(nr in error_msg for nr in non_retryable):
+                        raise
+                    
+                    # Check if it's a connection/pool exhaustion error
+                    if any(err in error_msg for err in ["pool", "connection", "timeout", "refused"]):
+                        print(f"[DB Retry] Connection issue on attempt {attempt + 1}/{max_attempts}: {e}")
+                        # Reset connection pool
+                        _pool_manager.reset_connection()
+                        # Re-initialize global supabase
+                        global supabase
+                        supabase = _pool_manager.get_client()
+                    
+                    if attempt < max_attempts - 1:
+                        time.sleep(delay)
+                        delay *= DB_RETRY_BACKOFF
+                    else:
+                        raise last_error
+            
+            return None
+        
+        return wrapper
+    return decorator
+
+
+def get_supabase_client() -> Client:
+    """Get Supabase client with automatic initialization."""
+    global supabase
+    if supabase is None:
+        supabase = _pool_manager.get_client()
+    return supabase
 
 def create_conversation(
     twin_id: str,

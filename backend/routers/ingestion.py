@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request, status
 from fastapi.responses import JSONResponse
 from modules.auth_guard import verify_owner, get_current_user, verify_twin_ownership, verify_source_ownership
 from modules.ingestion import detect_url_provider, extract_text_from_docx, extract_text_from_excel, extract_text_from_pdf
@@ -13,6 +13,61 @@ from modules.health_checks import calculate_content_hash, run_all_health_checks
 from modules.ingestion_diagnostics import start_step, finish_step, build_error
 
 router = APIRouter(tags=["ingestion"])
+
+# =============================================================================
+# SECURITY: FILE SIZE LIMITS (CRITICAL BUG FIX)
+# =============================================================================
+
+# Max file size: 50MB (configurable via environment)
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+
+# Allowed file extensions
+ALLOWED_EXTENSIONS = {
+    '.pdf': 'PDF document',
+    '.docx': 'Word document',
+    '.xlsx': 'Excel spreadsheet',
+    '.txt': 'Text file',
+    '.md': 'Markdown file',
+    '.csv': 'CSV file',
+    '.json': 'JSON file',
+}
+
+
+def _validate_file_size(content_length: int) -> None:
+    """
+    Validate file size before processing.
+    
+    Args:
+        content_length: File size in bytes
+        
+    Raises:
+        HTTPException: If file exceeds size limit
+    """
+    if content_length > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB. "
+                   f"Received {content_length / (1024*1024):.1f}MB."
+        )
+
+
+def _validate_file_extension(filename: str) -> None:
+    """
+    Validate file extension is allowed.
+    
+    Args:
+        filename: Name of the file
+        
+    Raises:
+        HTTPException: If extension not allowed
+    """
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"File type '{ext}' not supported. Allowed: {', '.join(ALLOWED_EXTENSIONS.keys())}"
+        )
 
 class YouTubeIngestRequest(BaseModel):
     url: str
@@ -142,6 +197,11 @@ async def ingest_file_endpoint(
         file: The file to upload
         Note: uploads are auto-indexed.
     
+    Security:
+        - Max file size: 50MB (configurable via MAX_FILE_SIZE_MB env var)
+        - Only allowed file extensions
+        - Content validated before processing
+    
     Deduplication:
         - Content hash (SHA-256) is calculated after text extraction
         - If identical content exists for this twin, returns existing source
@@ -155,15 +215,21 @@ async def ingest_file_endpoint(
         provider = "file"
         corr = _get_correlation_id(http_req) if http_req else None
         filename = file.filename or "upload"
+        
+        # Step 0: Validate file extension
+        _validate_file_extension(filename)
         file_extension = os.path.splitext(filename)[1]
         
-        # Step 1: Save uploaded file temporarily for extraction
+        # Step 1: Read file content with size validation
+        content = await file.read()
+        _validate_file_size(len(content))
+        
+        # Step 2: Save uploaded file temporarily for extraction
         temp_dir = "temp_uploads"
         os.makedirs(temp_dir, exist_ok=True)
         temp_filename = f"temp_{uuid.uuid4()}{file_extension}"
         temp_file_path = os.path.join(temp_dir, temp_filename)
         
-        content = await file.read()
         with open(temp_file_path, "wb") as f:
             f.write(content)
         

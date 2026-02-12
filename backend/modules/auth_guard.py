@@ -555,8 +555,24 @@ def verify_twin_ownership(twin_id: str, user: Dict[str, Any]) -> bool:
         HTTPException: If user doesn't own the twin
     """
     from modules.observability import supabase
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+
+    # API-key visitors are restricted to exactly one twin.
+    if user.get("role") == "visitor":
+        allowed_twin_id = user.get("twin_id")
+        if not allowed_twin_id or str(allowed_twin_id) != str(twin_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this twin"
+            )
+        return True
     
-    if not user or not user.get("user_id"):
+    if not user.get("user_id"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required"

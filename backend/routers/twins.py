@@ -352,10 +352,13 @@ async def get_twin_verification_status(twin_id: str, user=Depends(get_current_us
     
     try:
         # 1. Check Vectors in Pinecone
+        from modules.delphi_namespace import get_namespace_candidates_for_twin
         index = get_pinecone_index()
         p_stats = index.describe_index_stats()
-        if twin_id in p_stats.get("namespaces", {}):
-            status["vectors_count"] = p_stats["namespaces"][twin_id]["vector_count"]
+        namespaces = p_stats.get("namespaces", {})
+        for namespace in get_namespace_candidates_for_twin(twin_id=twin_id, include_legacy=True):
+            if namespace in namespaces:
+                status["vectors_count"] += namespaces[namespace]["vector_count"]
         
         if status["vectors_count"] == 0:
             status["issues"].append("No knowledge vectors found (upload documents first)")
@@ -778,12 +781,13 @@ async def delete_twin(
         
         # 1. Delete Pinecone namespace
         try:
+            from modules.delphi_namespace import get_namespace_candidates_for_twin
             index = get_pinecone_index()
-            # Delete all vectors in the twin's namespace
-            index.delete(delete_all=True, namespace=twin_id)
-            print(f"[TWINS] Cleared Pinecone namespace for twin {twin_id}")
+            for namespace in get_namespace_candidates_for_twin(twin_id=twin_id, include_legacy=True):
+                index.delete(delete_all=True, namespace=namespace)
+            print(f"[TWINS] Cleared Pinecone namespaces for twin {twin_id}")
         except Exception as e:
-            print(f"[TWINS] Warning: Failed to clear Pinecone namespace: {e}")
+            print(f"[TWINS] Warning: Failed to clear Pinecone namespaces: {e}")
             # Mark as pending cleanup but continue with DB deletion
             cleanup_status = "pending"
         

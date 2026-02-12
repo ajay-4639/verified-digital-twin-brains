@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 from modules.observability import supabase
 from modules.job_queue import enqueue_job
+from modules.delphi_namespace import get_namespace_candidates_for_twin
 # Note: process_and_index_text is imported inside process_training_job to avoid circular import
 
 
@@ -183,18 +184,26 @@ async def process_training_job(job_id: str) -> bool:
 
             # Query Pinecone for all chunks from this source
             try:
-                # Use a dummy query to get all vectors for this source
-                query_res = index.query(
-                    vector=[0.1] * 3072,  # Dummy vector
-                    top_k=1000,
-                    include_metadata=True,
-                    filter={"source_id": {"$eq": source_id}},
-                    namespace=twin_id
-                )
+                # Use a dummy query to get all vectors for this source.
+                # During migration we probe creator + legacy namespaces.
+                matches = []
+                for namespace in get_namespace_candidates_for_twin(twin_id=twin_id, include_legacy=True):
+                    try:
+                        query_res = index.query(
+                            vector=[0.1] * 3072,  # Dummy vector
+                            top_k=1000,
+                            include_metadata=True,
+                            filter={"source_id": {"$eq": source_id}},
+                            namespace=namespace
+                        )
+                        if query_res.get("matches"):
+                            matches.extend(query_res["matches"])
+                    except Exception as ns_error:
+                        print(f"[Process Job] Namespace query failed ({namespace}): {ns_error}")
 
-                if query_res.get("matches"):
+                if matches:
                     # Reconstruct text from chunks (sorted by some order if available)
-                    chunks = [match["metadata"].get("text", "") for match in query_res["matches"]]
+                    chunks = [match["metadata"].get("text", "") for match in matches]
                     extracted_text = " ".join(chunks)
 
                     if extracted_text:

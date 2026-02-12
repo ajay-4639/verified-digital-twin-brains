@@ -2,6 +2,7 @@ import uuid
 from modules.clients import get_pinecone_index
 from modules.embeddings import get_embedding
 from modules.observability import supabase
+from modules.delphi_namespace import get_primary_namespace_for_twin, resolve_creator_id_for_twin
 
 async def inject_verified_memory(escalation_id: str, owner_answer: str):
     """
@@ -22,6 +23,9 @@ async def inject_verified_memory(escalation_id: str, owner_answer: str):
     index = get_pinecone_index()
     vector_id = f"verified_{str(uuid.uuid4())}"
     
+    creator_id = resolve_creator_id_for_twin(twin_id)
+    namespace = get_primary_namespace_for_twin(twin_id=twin_id, creator_id=creator_id)
+
     index.upsert(
         vectors=[{
         "id": vector_id,
@@ -29,12 +33,13 @@ async def inject_verified_memory(escalation_id: str, owner_answer: str):
         "metadata": {
             "text": owner_answer,
             "twin_id": twin_id,
+            "creator_id": creator_id,
             "source_id": f"verified_{escalation_id}",
             "is_verified": True,
             "priority": 10 # High priority for verified answers
         }
         }],
-        namespace=twin_id
+        namespace=namespace
     )
     
     return vector_id

@@ -267,6 +267,7 @@ async def _select_seeds_semantic(
         import asyncio
         from modules.embeddings import get_embedding
         from modules.clients import get_pinecone_index
+        from modules.delphi_namespace import get_namespace_candidates_for_twin
         
         loop = asyncio.get_event_loop()
         
@@ -280,12 +281,19 @@ async def _select_seeds_semantic(
         index = get_pinecone_index()
         
         def _query_pinecone():
-            return index.query(
-                vector=query_embedding,
-                top_k=top_k * 2,  # Get more than needed for filtering
-                include_metadata=True,
-                namespace=twin_id
-            )
+            matches = []
+            for namespace in get_namespace_candidates_for_twin(twin_id=twin_id, include_legacy=True):
+                try:
+                    res = index.query(
+                        vector=query_embedding,
+                        top_k=top_k * 2,  # Get more than needed for filtering
+                        include_metadata=True,
+                        namespace=namespace
+                    )
+                    matches.extend(res.get("matches", []))
+                except Exception as ns_error:
+                    print(f"[GraphContext] Namespace query failed ({namespace}): {ns_error}")
+            return {"matches": matches}
         
         results = await loop.run_in_executor(None, _query_pinecone)
         

@@ -92,7 +92,7 @@ export function useAuthFetch() {
             
             throw error;
         }
-    }, [getAuthToken]);
+    }, [getAuthToken, isEnabled, logError, logRequest, logResponse]);
 
     /**
      * GET request helper
@@ -168,15 +168,15 @@ export function useAuthFetch() {
     /**
      * Check if endpoint is in the allowlist for optional twin_id filtering
      */
-    const isTwinFilterAllowed = (endpoint: string): boolean => {
+    const isTwinFilterAllowed = useCallback((endpoint: string): boolean => {
         const basePath = endpoint.split('?')[0];
         return TWIN_FILTER_ALLOWLIST.some(allowed => basePath === allowed || basePath.startsWith(allowed + '?'));
-    };
+    }, []);
 
     /**
      * Validate tenant endpoint - blocks /twins/ paths AND twin_id params (except allowlist)
      */
-    const validateTenantEndpointHook = (endpoint: string, method: string): void => {
+    const validateTenantEndpointHook = useCallback((endpoint: string, method: string): void => {
         // Block /twins/{id}/ path patterns
         if (/\/twins\/[^/]+/.test(endpoint)) {
             console.error(`[SCOPE VIOLATION] Tenant ${method} contains /twins/ path:`, endpoint);
@@ -187,7 +187,7 @@ export function useAuthFetch() {
             console.error(`[SCOPE VIOLATION] Tenant ${method} contains twin_id param (not allowlisted):`, endpoint);
             throw new Error(`Tenant-scoped endpoint cannot use twin_id param: ${endpoint}. Allowlisted: ${TWIN_FILTER_ALLOWLIST.join(', ')}`);
         }
-    };
+    }, [isTwinFilterAllowed]);
 
     /**
      * Tenant-scoped GET - validates no twin references (except allowlist)
@@ -195,7 +195,7 @@ export function useAuthFetch() {
     const getTenant = useCallback(async (endpoint: string): Promise<Response> => {
         validateTenantEndpointHook(endpoint, 'GET');
         return authFetch(endpoint, { method: 'GET' });
-    }, [authFetch]);
+    }, [authFetch, validateTenantEndpointHook]);
 
     /**
      * Tenant-scoped POST - validates no twin references
@@ -209,7 +209,7 @@ export function useAuthFetch() {
             options.body = JSON.stringify(body);
         }
         return authFetch(endpoint, options);
-    }, [authFetch]);
+    }, [authFetch, validateTenantEndpointHook]);
 
     /**
      * Tenant-scoped DELETE - validates no twin references
@@ -217,7 +217,7 @@ export function useAuthFetch() {
     const delTenant = useCallback(async (endpoint: string): Promise<Response> => {
         validateTenantEndpointHook(endpoint, 'DELETE');
         return authFetch(endpoint, { method: 'DELETE' });
-    }, [authFetch]);
+    }, [authFetch, validateTenantEndpointHook]);
 
     /**
      * Twin-scoped GET - validates twinId present and substitutes template

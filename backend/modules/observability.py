@@ -258,14 +258,17 @@ async def get_knowledge_profile(twin_id: str):
     # Query Pinecone for a sample of vectors to analyze metadata
     # We use a dummy non-zero vector for a broad search within the namespace
     # Dimensions for text-embedding-3-large is 3072
-    query_res = index.query(
-        vector=[0.1] * 3072,
-        top_k=1000, # Analyze up to 1000 chunks
-        include_metadata=True,
-        namespace=twin_id
-    )
-    
-    matches = query_res.get("matches", [])
+    from modules.delphi_namespace import get_namespace_candidates_for_twin
+
+    matches = []
+    for namespace in get_namespace_candidates_for_twin(twin_id=twin_id, include_legacy=True):
+        query_res = index.query(
+            vector=[0.1] * 3072,
+            top_k=1000, # Analyze up to 1000 chunks
+            include_metadata=True,
+            namespace=namespace
+        )
+        matches.extend(query_res.get("matches", []))
     total_chunks = len(matches)
     
     fact_count = 0

@@ -5,10 +5,69 @@ from modules.clients import get_openai_client, get_pinecone_index, get_cohere_cl
 from modules.verified_qna import match_verified_qna
 from modules.observability import supabase
 from modules.access_groups import get_default_group
+from modules.delphi_namespace import (
+    build_creator_namespace,
+    get_namespace_candidates_for_twin,
+    get_primary_namespace_for_twin,
+    resolve_creator_id_for_twin,
+)
 
 # Embedding generation moved to modules.embeddings
 # Embedding generation moved to modules.embeddings
 from modules.embeddings import get_embedding, get_embeddings_async
+
+# =============================================================================
+# NAMESPACE FORMAT (Delphi.ai Architecture)
+# =============================================================================
+# New format: creator_{creator_id}_twin_{twin_id}
+# Legacy format: {twin_id} (UUID or custom string)
+# 
+# Migration: Phase 1 complete - All data migrated to creator-based namespaces
+# =============================================================================
+
+def get_namespace(creator_id: Optional[str], twin_id: str) -> str:
+    """
+    Generate Pinecone namespace following Delphi architecture.
+    
+    Args:
+        creator_id: Creator ID (e.g., 'sainath.no.1') or None for legacy
+        twin_id: Twin ID (e.g., 'coach', 'assistant', or UUID)
+        
+    Returns:
+        Namespace string for Pinecone
+        
+    Examples:
+        >>> get_namespace("sainath.no.1", "coach")
+        'creator_sainath.no.1_twin_coach'
+        >>> get_namespace(None, "5698a809-87a5-4169-ab9b-c4a6222ae2dd")
+        '5698a809-87a5-4169-ab9b-c4a6222ae2dd'
+    """
+    if creator_id:
+        return build_creator_namespace(creator_id, twin_id)
+    return get_primary_namespace_for_twin(twin_id)
+
+
+def parse_namespace(namespace: str) -> tuple[Optional[str], str]:
+    """
+    Parse a namespace into creator_id and twin_id.
+    
+    Args:
+        namespace: Pinecone namespace string
+        
+    Returns:
+        Tuple of (creator_id, twin_id) - creator_id is None for legacy
+        
+    Examples:
+        >>> parse_namespace("creator_sainath.no.1_twin_coach")
+        ('sainath.no.1', 'coach')
+        >>> parse_namespace("5698a809-87a5-4169-ab9b-c4a6222ae2dd")
+        (None, '5698a809-87a5-4169-ab9b-c4a6222ae2dd')
+    """
+    if namespace.startswith("creator_"):
+        parts = namespace.replace("creator_", "").split("_twin_", 1)
+        if len(parts) == 2:
+            return parts[0], parts[1]
+    return None, namespace
 
 # FlashRank for local reranking
 try:
@@ -203,6 +262,7 @@ def _prepare_search_queries(query: str) -> List[str]:
 async def _execute_pinecone_queries(
     embeddings: List[List[float]],
     twin_id: str,
+    creator_id: Optional[str] = None,
     timeout: float = 5.0
 ) -> List[Dict[str, Any]]:
     """
@@ -210,7 +270,8 @@ async def _execute_pinecone_queries(
     
     Args:
         embeddings: List of embedding vectors
-        twin_id: Twin ID (namespace)
+        twin_id: Twin ID
+        creator_id: Creator ID (for Delphi namespace format) - None for legacy
         timeout: Timeout in seconds
         
     Returns:
@@ -218,39 +279,83 @@ async def _execute_pinecone_queries(
     """
     index = get_pinecone_index()
     loop = asyncio.get_event_loop()
-    
+
+    resolved_creator = creator_id or resolve_creator_id_for_twin(twin_id)
+    namespace_candidates = get_namespace_candidates_for_twin(
+        twin_id=twin_id,
+        creator_id=resolved_creator,
+        include_legacy=True,
+    )
+
+    def _extract_matches(response: Any) -> List[Dict[str, Any]]:
+        if isinstance(response, dict):
+            return response.get("matches", []) or []
+        raw = getattr(response, "matches", []) or []
+        normalized = []
+        for match in raw:
+            if isinstance(match, dict):
+                normalized.append(match)
+            else:
+                normalized.append(
+                    {
+                        "id": getattr(match, "id", None),
+                        "score": getattr(match, "score", 0.0),
+                        "metadata": getattr(match, "metadata", {}) or {},
+                    }
+                )
+        return normalized
+
+    def _merge_matches(matches: List[Dict[str, Any]]) -> Dict[str, Any]:
+        # Keep best score for duplicate ids across namespaces.
+        dedup: Dict[str, Dict[str, Any]] = {}
+        for m in matches:
+            mid = str(m.get("id"))
+            score = float(m.get("score", 0.0) or 0.0)
+            if mid not in dedup or score > float(dedup[mid].get("score", 0.0) or 0.0):
+                dedup[mid] = m
+        merged = sorted(dedup.values(), key=lambda x: float(x.get("score", 0.0) or 0.0), reverse=True)
+        return {"matches": merged}
+
     async def pinecone_query(embedding: List[float], is_verified: bool = False) -> Dict[str, Any]:
-        """Execute a single Pinecone query."""
+        """Execute one query across namespace candidates and merge."""
         top_k = 5 if is_verified else 20
-        
-        def _fetch():
-            query_params = {
-                "vector": embedding,
-                "top_k": top_k,
-                "include_metadata": True,
-                "namespace": twin_id,
-            }
-            # Only filter for verified search
-            # For general search, don't filter - search all vectors in namespace
-            # This ensures sources without is_verified field are included
-            if is_verified:
-                query_params["filter"] = {"is_verified": {"$eq": True}}
-            
-            return index.query(**query_params)
-        return await loop.run_in_executor(None, _fetch)
-    
-    # Use original query for verified search
-    verified_task = pinecone_query(embeddings[0], is_verified=True)
-    
-    # Use all variations for general search
-    general_tasks = [pinecone_query(emb, is_verified=False) for emb in embeddings]
-    
-    try:
-        all_results = await asyncio.wait_for(
-            asyncio.gather(verified_task, *general_tasks),
-            timeout=timeout
+
+        async def query_namespace(namespace: str):
+            def _fetch():
+                query_params = {
+                    "vector": embedding,
+                    "top_k": top_k,
+                    "include_metadata": True,
+                    "namespace": namespace,
+                }
+                if is_verified:
+                    query_params["filter"] = {"is_verified": {"$eq": True}}
+                return index.query(**query_params)
+
+            return await loop.run_in_executor(None, _fetch)
+
+        namespace_results = await asyncio.gather(
+            *[query_namespace(ns) for ns in namespace_candidates],
+            return_exceptions=True,
         )
-        return all_results
+
+        merged_matches: List[Dict[str, Any]] = []
+        for ns, ns_result in zip(namespace_candidates, namespace_results):
+            if isinstance(ns_result, Exception):
+                print(f"[Retrieval] Namespace query failed ({ns}): {ns_result}")
+                continue
+            merged_matches.extend(_extract_matches(ns_result))
+
+        return _merge_matches(merged_matches)
+
+    verified_task = pinecone_query(embeddings[0], is_verified=True)
+    general_tasks = [pinecone_query(emb, is_verified=False) for emb in embeddings]
+
+    try:
+        return await asyncio.wait_for(
+            asyncio.gather(verified_task, *general_tasks),
+            timeout=timeout,
+        )
     except asyncio.TimeoutError:
         print(f"[Retrieval] Vector search timed out after {timeout}s, returning empty contexts")
         return []
@@ -392,6 +497,7 @@ def _deduplicate_and_limit(
 async def retrieve_context_with_verified_first(
     query: str,
     twin_id: str,
+    creator_id: Optional[str] = None,
     group_id: Optional[str] = None,
     top_k: int = 5
 ) -> List[Dict[str, Any]]:
@@ -399,6 +505,13 @@ async def retrieve_context_with_verified_first(
     Retrieval pipeline with verified-first order: Check verified QnA → vectors → tools.
     Returns contexts with verified_qna_match flag if verified answer found.
     If group_id is None, uses default group for backward compatibility.
+    
+    Args:
+        query: Search query
+        twin_id: Twin ID
+        creator_id: Creator ID (for Delphi namespace format) - None for legacy
+        group_id: Access group for filtering (optional)
+        top_k: Number of results to return
     """
     # Resolve group_id to default if None
     if group_id is None:
@@ -427,13 +540,14 @@ async def retrieve_context_with_verified_first(
         return [_format_verified_match_context(verified_match)]
     
     # STEP 2: No verified match - proceed with vector retrieval
-    return await retrieve_context_vectors(query, twin_id, group_id=group_id, top_k=top_k)
+    return await retrieve_context_vectors(query, twin_id, creator_id=creator_id, group_id=group_id, top_k=top_k)
 
 
 @observe(name="rag_vector_retrieval")
 async def retrieve_context_vectors(
     query: str,
     twin_id: str,
+    creator_id: Optional[str] = None,
     group_id: Optional[str] = None,
     top_k: int = 5
 ) -> List[Dict[str, Any]]:
@@ -441,6 +555,13 @@ async def retrieve_context_vectors(
     Optimized retrieval pipeline using HyDE, Query Expansion, and RRF (vector-only).
     Used when no verified QnA match is found.
     If group_id is provided, filters results by group permissions.
+    
+    Args:
+        query: Search query
+        twin_id: Twin ID
+        creator_id: Creator ID (for Delphi namespace format) - None for legacy
+        group_id: Access group for filtering (optional)
+        top_k: Number of results to return
     """
     # 1. Parallel Query Expansion & HyDE
     expanded_task = expand_query(query)
@@ -454,7 +575,7 @@ async def retrieve_context_vectors(
     all_embeddings = await get_embeddings_async(search_queries)
     
     # 3. Parallel Vector Search - P1-C: 20s timeout (increased for debugging)
-    all_results = await _execute_pinecone_queries(all_embeddings, twin_id, timeout=20.0)
+    all_results = await _execute_pinecone_queries(all_embeddings, twin_id, creator_id=creator_id, timeout=20.0)
     
     if not all_results:
         return []
@@ -518,7 +639,8 @@ async def retrieve_context_vectors(
         final_contexts = unique_contexts[:top_k]
 
     
-    print(f"[Retrieval] Found {len(final_contexts)} contexts for twin_id={twin_id} (namespace={twin_id})")
+    namespace = get_namespace(creator_id, twin_id)
+    print(f"[Retrieval] Found {len(final_contexts)} contexts for twin_id={twin_id} (namespace={namespace})")
     if final_contexts:
         top_scores = [round(float(c.get("score", 0.0) or 0.0), 3) for c in final_contexts[:3]]
         print(f"[Retrieval] Top scores: {top_scores}")
@@ -557,9 +679,24 @@ async def retrieve_context_vectors(
     return final_contexts
 
 
-async def retrieve_context(query: str, twin_id: str, group_id: Optional[str] = None, top_k: int = 5):
+async def retrieve_context(
+    query: str, 
+    twin_id: str, 
+    creator_id: Optional[str] = None,
+    group_id: Optional[str] = None, 
+    top_k: int = 5
+):
     """
     Main retrieval function - uses verified-first order.
     Backward compatible wrapper around retrieve_context_with_verified_first.
+    
+    Args:
+        query: Search query
+        twin_id: Twin ID
+        creator_id: Creator ID (for Delphi namespace format) - None for legacy
+        group_id: Access group for filtering (optional)
+        top_k: Number of results to return
     """
-    return await retrieve_context_with_verified_first(query, twin_id, group_id=group_id, top_k=top_k)
+    return await retrieve_context_with_verified_first(
+        query, twin_id, creator_id=creator_id, group_id=group_id, top_k=top_k
+    )

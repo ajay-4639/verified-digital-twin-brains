@@ -563,20 +563,37 @@ def verify_twin_ownership(twin_id: str, user: Dict[str, Any]) -> bool:
         )
     
     user_id = user.get("user_id")
+    tenant_id = user.get("tenant_id")
+    if not tenant_id:
+        try:
+            tenant_id = resolve_tenant_id(
+                user_id=user_id,
+                email=user.get("email"),
+                create_if_missing=False,
+            )
+        except HTTPException:
+            tenant_id = None
     
     try:
-        result = supabase.table("twins").select("user_id").eq("id", twin_id).single().execute()
+        if not tenant_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Twin not found or access denied"
+            )
+
+        result = (
+            supabase.table("twins")
+            .select("id, tenant_id")
+            .eq("id", twin_id)
+            .eq("tenant_id", tenant_id)
+            .single()
+            .execute()
+        )
         
         if not result.data:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Twin {twin_id} not found"
-            )
-        
-        if result.data.get("user_id") != user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to this twin"
+                detail="Twin not found or access denied"
             )
         
         return True
@@ -614,6 +631,16 @@ def verify_source_ownership(source_id: str, user: Dict[str, Any]) -> bool:
         )
     
     user_id = user.get("user_id")
+    tenant_id = user.get("tenant_id")
+    if not tenant_id:
+        try:
+            tenant_id = resolve_tenant_id(
+                user_id=user_id,
+                email=user.get("email"),
+                create_if_missing=False,
+            )
+        except HTTPException:
+            tenant_id = None
     
     try:
         # Get source and its twin
@@ -627,13 +654,26 @@ def verify_source_ownership(source_id: str, user: Dict[str, Any]) -> bool:
         
         twin_id = source_result.data.get("twin_id")
         
-        # Check twin ownership
-        twin_result = supabase.table("twins").select("user_id").eq("id", twin_id).single().execute()
-        
-        if not twin_result.data or twin_result.data.get("user_id") != user_id:
+        # Check twin ownership by tenant scope
+        if not tenant_id:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to this source"
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Source not found or access denied"
+            )
+
+        twin_result = (
+            supabase.table("twins")
+            .select("id, tenant_id")
+            .eq("id", twin_id)
+            .eq("tenant_id", tenant_id)
+            .single()
+            .execute()
+        )
+        
+        if not twin_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Source not found or access denied"
             )
         
         return True

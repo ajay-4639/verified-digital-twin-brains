@@ -96,17 +96,19 @@ async def get_owner_style_profile(twin_id: str, force_refresh: bool = False) -> 
         
         # B. Fetch some OPINION chunks from Pinecone for style variety
         from modules.clients import get_pinecone_index
+        from modules.delphi_namespace import get_namespace_candidates_for_twin
         index = get_pinecone_index()
         try:
-            opinion_search = index.query(
-                vector=[0.1] * 3072, # Use non-zero vector for metadata filtering
-                filter={"category": {"$eq": "OPINION"}},
-                top_k=20, # Increased for better analysis
-                include_metadata=True,
-                namespace=twin_id
-            )
-            for match in opinion_search.get("matches", []):
-                analysis_texts.append(f"OPINION DOC: {match['metadata']['text']}")
+            for namespace in get_namespace_candidates_for_twin(twin_id=twin_id, include_legacy=True):
+                opinion_search = index.query(
+                    vector=[0.1] * 3072, # Use non-zero vector for metadata filtering
+                    filter={"category": {"$eq": "OPINION"}},
+                    top_k=20, # Increased for better analysis
+                    include_metadata=True,
+                    namespace=namespace
+                )
+                for match in opinion_search.get("matches", []):
+                    analysis_texts.append(f"OPINION DOC: {match['metadata']['text']}")
         except Exception as pe:
             print(f"Error fetching opinions for style: {pe}")
 

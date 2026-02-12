@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { API_BASE_URL } from '@/lib/constants';
 
 interface HealthStatus {
@@ -11,33 +11,39 @@ interface HealthStatus {
   lastChecked: Date;
 }
 
+interface VersionInfo {
+  git_sha?: string;
+  environment?: string;
+  build_time?: string;
+  service?: string;
+  version?: string;
+}
+
 export default function AdminDashboard() {
   const [services, setServices] = useState<HealthStatus[]>([
     { name: 'Backend API', status: 'checking', message: 'Checking...', lastChecked: new Date() },
     { name: 'Database', status: 'checking', message: 'Checking...', lastChecked: new Date() },
     { name: 'Authentication', status: 'checking', message: 'Checking...', lastChecked: new Date() },
   ]);
-  const [version, setVersion] = useState<any>(null);
+  const [version, setVersion] = useState<VersionInfo | null>(null);
 
-  useEffect(() => {
-    checkAllServices();
-    const interval = setInterval(checkAllServices, 30000);
-    return () => clearInterval(interval);
+  const updateService = useCallback((name: string, status: HealthStatus['status'], message: string, latency?: number) => {
+    setServices(prev => prev.map(s =>
+      s.name === name
+        ? { ...s, status, message, latency, lastChecked: new Date() }
+        : s
+    ));
   }, []);
 
-  const checkAllServices = async () => {
-    // Check Backend API
-    const startTime = performance.now();
+  const checkAllServices = useCallback(async () => {
     try {
       const healthRes = await fetch(`${API_BASE_URL}/health`, {
         signal: AbortSignal.timeout(5000)
       });
-      const latency = Math.round(performance.now() - startTime);
       
       updateService('Backend API', 
         healthRes.ok ? 'healthy' : 'unhealthy',
-        healthRes.ok ? `Responding in ${latency}ms` : `HTTP ${healthRes.status}`,
-        latency
+        healthRes.ok ? 'Responding' : `HTTP ${healthRes.status}`
       );
 
       if (healthRes.ok) {
@@ -48,7 +54,7 @@ export default function AdminDashboard() {
           data.ingestion_diagnostics_schema?.available ? 'Connected' : 'Schema unavailable'
         );
       }
-    } catch (err) {
+    } catch {
       updateService('Backend API', 'unhealthy', 'Connection failed');
       updateService('Database', 'unhealthy', 'Cannot reach backend');
     }
@@ -60,7 +66,7 @@ export default function AdminDashboard() {
       });
       
       if (versionRes.ok) {
-        const data = await versionRes.json();
+        const data: VersionInfo = await versionRes.json();
         setVersion(data);
         updateService('Authentication', 'healthy', 'Service available');
       } else {
@@ -69,15 +75,15 @@ export default function AdminDashboard() {
     } catch {
       updateService('Authentication', 'unhealthy', 'Connection failed');
     }
-  };
+  }, [updateService]);
 
-  const updateService = (name: string, status: HealthStatus['status'], message: string, latency?: number) => {
-    setServices(prev => prev.map(s => 
-      s.name === name 
-        ? { ...s, status, message, latency, lastChecked: new Date() }
-        : s
-    ));
-  };
+  useEffect(() => {
+    void checkAllServices();
+    const interval = setInterval(() => {
+      void checkAllServices();
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [checkAllServices]);
 
   const getStatusColor = (status: HealthStatus['status']) => {
     switch (status) {
@@ -146,7 +152,11 @@ export default function AdminDashboard() {
             </div>
             <div>
               <span className="text-slate-500">Build Time:</span>
-              <span className="ml-2">{version.build_time !== 'unknown' ? new Date(version.build_time).toLocaleString() : 'Unknown'}</span>
+              <span className="ml-2">
+                {version.build_time && version.build_time !== 'unknown'
+                  ? new Date(version.build_time).toLocaleString()
+                  : 'Unknown'}
+              </span>
             </div>
             <div>
               <span className="text-slate-500">Service:</span>

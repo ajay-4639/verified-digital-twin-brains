@@ -37,7 +37,8 @@ from routers import (
     api_keys,  # Tenant-scoped API keys management
     debug_retrieval, # New debug router
     verify,
-    owner_memory
+    owner_memory,
+    retrieval_delphi,
 )
 from modules.specializations import get_specialization
 
@@ -97,6 +98,13 @@ app.include_router(api_keys.router)
 app.include_router(debug_retrieval.router)
 app.include_router(verify.router)
 app.include_router(owner_memory.router)
+
+DELPHI_RETRIEVAL_ENABLED = os.getenv("ENABLE_DELPHI_RETRIEVAL", "false").lower() == "true"
+if DELPHI_RETRIEVAL_ENABLED:
+    app.include_router(retrieval_delphi.router)
+    print("[INFO] Delphi retrieval routes enabled (ENABLE_DELPHI_RETRIEVAL=true)")
+else:
+    print("[INFO] Delphi retrieval routes disabled (ENABLE_DELPHI_RETRIEVAL=false)")
 
 
 

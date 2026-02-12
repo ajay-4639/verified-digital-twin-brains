@@ -24,6 +24,7 @@ from modules.ingestion_diagnostics import start_step, finish_step, build_error
 from modules.health_checks import run_all_health_checks, calculate_content_hash
 from modules.access_groups import get_default_group, add_content_permission
 from modules.governance import AuditLogger
+from modules.delphi_namespace import get_primary_namespace_for_twin, resolve_creator_id_for_twin
 
 
 # ============================================================================
@@ -1906,10 +1907,19 @@ async def process_and_index_text(
             supabase.table("chunks").insert(db_chunks).execute()
             print(f"[Supabase] Persisted {len(db_chunks)} chunks for source_id={source_id}")
 
-        # Upsert vectors to Pinecone (namespace = twin_id for isolation)
+        # Upsert vectors to Pinecone (Delphi creator namespace with legacy fallback)
         if vectors:
-            index.upsert(vectors=vectors, namespace=twin_id)
-            print(f"[Pinecone] Upserted {len(vectors)} vectors to namespace={twin_id}")
+            creator_id = resolve_creator_id_for_twin(twin_id)
+            namespace = get_primary_namespace_for_twin(twin_id=twin_id, creator_id=creator_id)
+            for vector in vectors:
+                md = vector.get("metadata") or {}
+                if creator_id:
+                    md["creator_id"] = creator_id
+                md["twin_id"] = twin_id
+                vector["metadata"] = md
+
+            index.upsert(vectors=vectors, namespace=namespace)
+            print(f"[Pinecone] Upserted {len(vectors)} vectors to namespace={namespace}")
 
         # Ensure default group has access to this source (required for retrieval filtering)
         try:
@@ -2141,12 +2151,13 @@ async def delete_source(source_id: str, twin_id: str):
     # 1. Delete from Pinecone
     index = get_pinecone_index()
     try:
+        namespace = get_primary_namespace_for_twin(twin_id)
         # Note: Delete by filter requires metadata indexing enabled or serverless index
         index.delete(
             filter={
                 "source_id": {"$eq": source_id}
             },
-            namespace=twin_id
+            namespace=namespace
         )
     except Exception as e:
         print(f"Error deleting from Pinecone: {e}")

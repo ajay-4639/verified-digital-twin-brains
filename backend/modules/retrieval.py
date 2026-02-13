@@ -1,6 +1,10 @@
 import os
 import asyncio
+import time
+import logging
+import json
 from typing import List, Dict, Any, Optional, Set
+from contextlib import contextmanager
 from modules.clients import get_openai_client, get_pinecone_index, get_cohere_client
 from modules.verified_qna import match_verified_qna
 from modules.owner_memory_store import find_owner_memory_candidates
@@ -14,8 +18,58 @@ from modules.delphi_namespace import (
 )
 
 # Embedding generation moved to modules.embeddings
-# Embedding generation moved to modules.embeddings
 from modules.embeddings import get_embedding, get_embeddings_async
+
+# PHASE 4: Structured logging for observability
+logger = logging.getLogger(__name__)
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+# Retrieval timing budgets (env-overridable) keep chat responsive under load.
+RETRIEVAL_QUERY_PREP_TIMEOUT = _float_env("RETRIEVAL_QUERY_PREP_TIMEOUT_SECONDS", 6.0)
+RETRIEVAL_EMBEDDING_TIMEOUT = _float_env("RETRIEVAL_EMBEDDING_TIMEOUT_SECONDS", 8.0)
+RETRIEVAL_VECTOR_TIMEOUT = _float_env("RETRIEVAL_VECTOR_TIMEOUT_SECONDS", 8.0)
+RETRIEVAL_PER_NAMESPACE_TIMEOUT = _float_env("RETRIEVAL_PER_NAMESPACE_TIMEOUT_SECONDS", 2.5)
+RETRIEVAL_MAX_SEARCH_QUERIES = max(1, _int_env("RETRIEVAL_MAX_SEARCH_QUERIES", 4))
+
+
+def log_retrieval_event(event_type: str, data: Dict[str, Any]):
+    """Log structured retrieval events for monitoring."""
+    log_entry = {
+        "timestamp": time.time(),
+        "component": "retrieval",
+        "event": event_type,
+        **data
+    }
+    logger.info(json.dumps(log_entry))
+
+
+@contextmanager
+def measure_phase(phase_name: str, twin_id: str):
+    """Context manager to measure and log phase timing."""
+    start = time.time()
+    try:
+        yield
+    finally:
+        elapsed = time.time() - start
+        log_retrieval_event("phase_timing", {
+            "phase": phase_name,
+            "twin_id": twin_id,
+            "duration_ms": round(elapsed * 1000, 2)
+        })
 
 # =============================================================================
 # NAMESPACE FORMAT (Delphi.ai Architecture)
@@ -119,12 +173,13 @@ async def expand_query(query: str) -> List[str]:
                     {"role": "user", "content": f"Original query: {query}"}
                 ],
                 max_tokens=150,
-                temperature=0.7
+                temperature=0.7,
+                timeout=RETRIEVAL_QUERY_PREP_TIMEOUT
             )
             
         response = await loop.run_in_executor(None, _fetch)
         content = response.choices[0].message.content
-        variations = [line.strip().lstrip("-*•123. ").strip() for line in content.split("\n") if line.strip()]
+        variations = [line.strip().lstrip("-*123. ").strip() for line in content.split("\n") if line.strip()]
         return variations[:3]
     except Exception as e:
         print(f"Error expanding query: {e}")
@@ -145,7 +200,8 @@ async def generate_hyde_answer(query: str) -> str:
                     {"role": "user", "content": query}
                 ],
                 max_tokens=250,
-                temperature=0.3
+                temperature=0.3,
+                timeout=RETRIEVAL_QUERY_PREP_TIMEOUT
             )
             
         response = await loop.run_in_executor(None, _fetch)
@@ -336,15 +392,22 @@ async def _execute_pinecone_queries(
     Returns:
         List of query results
     """
+    if not embeddings:
+        return []
+
     index = get_pinecone_index()
     loop = asyncio.get_event_loop()
 
     resolved_creator = creator_id or resolve_creator_id_for_twin(twin_id)
+    dual_read_enabled = os.getenv("DELPHI_DUAL_READ", "true").lower() == "true"
     namespace_candidates = get_namespace_candidates_for_twin(
         twin_id=twin_id,
         creator_id=resolved_creator,
-        include_legacy=True,
+        include_legacy=dual_read_enabled,
     )
+    if not namespace_candidates:
+        print("[Retrieval] No namespace candidates available, returning empty contexts")
+        return []
 
     def _extract_matches(response: Any) -> List[Dict[str, Any]]:
         if isinstance(response, dict):
@@ -391,7 +454,10 @@ async def _execute_pinecone_queries(
                     query_params["filter"] = {"is_verified": {"$eq": True}}
                 return index.query(**query_params)
 
-            return await loop.run_in_executor(None, _fetch)
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, _fetch),
+                timeout=RETRIEVAL_PER_NAMESPACE_TIMEOUT,
+            )
 
         namespace_results = await asyncio.gather(
             *[query_namespace(ns) for ns in namespace_candidates],
@@ -399,11 +465,29 @@ async def _execute_pinecone_queries(
         )
 
         merged_matches: List[Dict[str, Any]] = []
+        failed_namespaces = []
+        success_count = 0
+        
         for ns, ns_result in zip(namespace_candidates, namespace_results):
             if isinstance(ns_result, Exception):
-                print(f"[Retrieval] Namespace query failed ({ns}): {ns_result}")
+                failed_namespaces.append(ns)
+                print(f"[Retrieval] Namespace query failed ({ns}): {type(ns_result).__name__}: {ns_result}")
                 continue
-            merged_matches.extend(_extract_matches(ns_result))
+            
+            matches = _extract_matches(ns_result)
+            if matches:
+                success_count += 1
+                print(f"[Retrieval] Namespace {ns}: {len(matches)} matches")
+            merged_matches.extend(matches)
+        
+        # PHASE 2 FIX: Better logging for debugging
+        if failed_namespaces:
+            print(f"[Retrieval] Warning: {len(failed_namespaces)}/{len(namespace_candidates)} namespaces failed: {failed_namespaces}")
+        
+        if not merged_matches:
+            print(f"[Retrieval] No matches found in any namespace. Checked: {namespace_candidates}")
+        else:
+            print(f"[Retrieval] Total matches from {success_count} namespaces: {len(merged_matches)}")
 
         return _merge_matches(merged_matches)
 
@@ -411,10 +495,15 @@ async def _execute_pinecone_queries(
     general_tasks = [pinecone_query(emb, is_verified=False) for emb in embeddings]
 
     try:
-        return await asyncio.wait_for(
+        results = await asyncio.wait_for(
             asyncio.gather(verified_task, *general_tasks),
             timeout=timeout,
         )
+        if not results:
+            return []
+        if all(not (r.get("matches") if isinstance(r, dict) else None) for r in results):
+            return []
+        return results
     except asyncio.TimeoutError:
         print(f"[Retrieval] Vector search timed out after {timeout}s, returning empty contexts")
         return []
@@ -515,6 +604,8 @@ def _filter_by_group_permissions(
     # Filter contexts to only include chunks from allowed sources
     # Also allow verified memory (is_verified=True chunks) - they're always accessible
     filtered_contexts = []
+    rejected_count = 0
+    
     for c in contexts:
         source_id = str(c.get("source_id", ""))
         is_verified = c.get("is_verified", False)
@@ -522,6 +613,12 @@ def _filter_by_group_permissions(
         # Allow if verified memory OR if source_id matches an allowed source
         if is_verified or source_id in allowed_source_ids:
             filtered_contexts.append(c)
+        else:
+            rejected_count += 1
+    
+    # PHASE 2 FIX: Log filtering results
+    if rejected_count > 0:
+        print(f"[Retrieval] Group filtering: {len(filtered_contexts)} allowed, {rejected_count} rejected (group: {group_id})")
     
     return filtered_contexts
 
@@ -572,50 +669,90 @@ async def retrieve_context_with_verified_first(
         group_id: Access group for filtering (optional)
         top_k: Number of results to return
     """
+    query = (query or "").strip()
+    if not query:
+        return []
+
+    # PHASE 4: Start tracking retrieval metrics
+    retrieval_start = time.time()
+    
     # Resolve group_id to default if None
     if group_id is None:
         try:
-            default_group = await get_default_group(twin_id)
-            group_id = default_group["id"]
-        except Exception:
-            # If no default group exists, proceed without group filtering (backward compatibility)
+            with measure_phase("group_resolution", twin_id):
+                default_group = await get_default_group(twin_id)
+                group_id = default_group["id"]
+                print(f"[Retrieval] Using default group: {group_id}")
+        except Exception as e:
+            # PHASE 2 FIX: Better logging for group resolution failure
+            print(f"[Retrieval] No default group for twin {twin_id}: {e}")
+            print(f"[Retrieval] Proceeding without group filtering (all sources accessible)")
             group_id = None
     
     # STEP 1: Check owner-approved memory first (highest priority).
-    # If unavailable/weak, continue to verified QnA and vectors.
     owner_memory_match = None
     try:
-        owner_memory_match = await asyncio.wait_for(
-            asyncio.to_thread(_match_owner_memory, query, twin_id),
-            timeout=1.0,
-        )
+        with measure_phase("owner_memory_lookup", twin_id):
+            owner_memory_match = await asyncio.wait_for(
+                asyncio.to_thread(_match_owner_memory, query, twin_id),
+                timeout=1.0,
+            )
     except asyncio.TimeoutError:
+        log_retrieval_event("timeout", {"phase": "owner_memory_lookup", "twin_id": twin_id})
         print("[Retrieval] Owner memory lookup timed out after 1s, continuing.")
     except Exception as e:
+        log_retrieval_event("error", {"phase": "owner_memory_lookup", "twin_id": twin_id, "error": str(e)})
         print(f"[Retrieval] Owner memory lookup failed: {e}, continuing.")
 
     if owner_memory_match:
+        total_time = time.time() - retrieval_start
+        log_retrieval_event("retrieval_complete", {
+            "twin_id": twin_id,
+            "source": "owner_memory",
+            "contexts_found": 1,
+            "total_duration_ms": round(total_time * 1000, 2)
+        })
         return [_format_owner_memory_match_context(owner_memory_match)]
 
     # STEP 2: Check Verified QnA (next priority) - P1-C: 2s timeout
+    verified_match = None
     try:
-        verified_match = await asyncio.wait_for(
-            match_verified_qna(query, twin_id, group_id=group_id, use_exact=True, use_semantic=True, exact_threshold=0.7, semantic_threshold=0.75),
-            timeout=2.0
-        )
+        with measure_phase("verified_qna_lookup", twin_id):
+            verified_match = await asyncio.wait_for(
+                match_verified_qna(query, twin_id, group_id=group_id, use_exact=True, use_semantic=True, exact_threshold=0.7, semantic_threshold=0.75),
+                timeout=2.0
+            )
     except asyncio.TimeoutError:
+        log_retrieval_event("timeout", {"phase": "verified_qna_lookup", "twin_id": twin_id})
         print(f"[Retrieval] Verified QnA lookup timed out after 2s, falling back to vector retrieval")
-        verified_match = None
     except Exception as e:
+        log_retrieval_event("error", {"phase": "verified_qna_lookup", "twin_id": twin_id, "error": str(e)})
         print(f"[Retrieval] Verified QnA lookup failed: {e}, falling back to vector retrieval")
-        verified_match = None
     
     if verified_match and verified_match.get("similarity_score", 0) >= 0.7:
-        # Found a high-confidence verified answer - return immediately
+        total_time = time.time() - retrieval_start
+        log_retrieval_event("retrieval_complete", {
+            "twin_id": twin_id,
+            "source": "verified_qna",
+            "contexts_found": 1,
+            "total_duration_ms": round(total_time * 1000, 2),
+            "similarity_score": verified_match.get("similarity_score")
+        })
         return [_format_verified_match_context(verified_match)]
     
     # STEP 3: No high-priority match - proceed with vector retrieval
-    return await retrieve_context_vectors(query, twin_id, creator_id=creator_id, group_id=group_id, top_k=top_k)
+    with measure_phase("vector_retrieval", twin_id):
+        vector_results = await retrieve_context_vectors(query, twin_id, creator_id=creator_id, group_id=group_id, top_k=top_k)
+    
+    total_time = time.time() - retrieval_start
+    log_retrieval_event("retrieval_complete", {
+        "twin_id": twin_id,
+        "source": "vector_search",
+        "contexts_found": len(vector_results),
+        "total_duration_ms": round(total_time * 1000, 2)
+    })
+    
+    return vector_results
 
 
 @observe(name="rag_vector_retrieval")
@@ -638,19 +775,73 @@ async def retrieve_context_vectors(
         group_id: Access group for filtering (optional)
         top_k: Number of results to return
     """
-    # 1. Parallel Query Expansion & HyDE
-    expanded_task = expand_query(query)
-    hyde_task = generate_hyde_answer(query)
+    query = (query or "").strip()
+    if not query:
+        return []
+
+    # 1. Query prep under a strict timeout budget.
+    expanded_queries: List[str] = [query]
+    hyde_answer = query
+    try:
+        prep_results = await asyncio.wait_for(
+            asyncio.gather(
+                expand_query(query),
+                generate_hyde_answer(query),
+                return_exceptions=True,
+            ),
+            timeout=RETRIEVAL_QUERY_PREP_TIMEOUT,
+        )
+        expanded_raw, hyde_raw = prep_results
+        if isinstance(expanded_raw, list):
+            expanded_queries = [q for q in expanded_raw if isinstance(q, str) and q.strip()] or [query]
+        if isinstance(hyde_raw, str) and hyde_raw.strip():
+            hyde_answer = hyde_raw.strip()
+    except asyncio.TimeoutError:
+        print(f"[Retrieval] Query preparation timed out after {RETRIEVAL_QUERY_PREP_TIMEOUT}s, using original query")
+    except Exception as e:
+        print(f"[Retrieval] Query preparation failed: {e}, using original query")
+
+    search_queries: List[str] = []
+    for candidate in [query, hyde_answer] + expanded_queries:
+        c = (candidate or "").strip()
+        if c and c not in search_queries:
+            search_queries.append(c)
+        if len(search_queries) >= RETRIEVAL_MAX_SEARCH_QUERIES:
+            break
+    if not search_queries:
+        search_queries = [query]
     
-    expanded_queries, hyde_answer = await asyncio.gather(expanded_task, hyde_task)
+    # 2. Embeddings under timeout with single-query fallback.
+    all_embeddings: List[List[float]] = []
+    try:
+        all_embeddings = await asyncio.wait_for(
+            get_embeddings_async(search_queries),
+            timeout=RETRIEVAL_EMBEDDING_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        print(f"[Retrieval] Embedding batch timed out after {RETRIEVAL_EMBEDDING_TIMEOUT}s, falling back to single embedding")
+    except Exception as e:
+        print(f"[Retrieval] Embedding batch failed: {e}, falling back to single embedding")
+
+    if not all_embeddings:
+        try:
+            one = await asyncio.wait_for(
+                asyncio.to_thread(get_embedding, query),
+                timeout=min(RETRIEVAL_EMBEDDING_TIMEOUT, 4.0),
+            )
+            if one:
+                all_embeddings = [one]
+        except Exception as e:
+            print(f"[Retrieval] Single-embedding fallback failed: {e}")
+            return []
     
-    search_queries = list(set([query, hyde_answer] + expanded_queries))
-    
-    # 2. Parallel Embedding Generation (Batch)
-    all_embeddings = await get_embeddings_async(search_queries)
-    
-    # 3. Parallel Vector Search - P1-C: 20s timeout (increased for debugging)
-    all_results = await _execute_pinecone_queries(all_embeddings, twin_id, creator_id=creator_id, timeout=20.0)
+    # 3. Parallel Vector Search with bounded timeout.
+    all_results = await _execute_pinecone_queries(
+        all_embeddings,
+        twin_id,
+        creator_id=creator_id,
+        timeout=RETRIEVAL_VECTOR_TIMEOUT,
+    )
     
     if not all_results:
         return []
@@ -775,3 +966,102 @@ async def retrieve_context(
     return await retrieve_context_with_verified_first(
         query, twin_id, creator_id=creator_id, group_id=group_id, top_k=top_k
     )
+
+
+# =============================================================================
+# PHASE 2 FIX: Health Check Function for Monitoring
+# =============================================================================
+
+async def get_retrieval_health_status(twin_id: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Get health status of the retrieval system.
+    
+    Args:
+        twin_id: Optional twin ID to check namespace-specific health
+        
+    Returns:
+        Dict with health status information
+    """
+    status = {
+        "healthy": True,
+        "components": {},
+        "warnings": [],
+        "errors": []
+    }
+    stats = None
+    
+    # Check 1: Pinecone connection
+    try:
+        index = get_pinecone_index()
+        stats = index.describe_index_stats()
+        status["components"]["pinecone"] = {
+            "connected": True,
+            "total_vectors": getattr(stats, "total_vector_count", 0),
+            "namespaces": len(getattr(stats, "namespaces", {}) or {})
+        }
+    except Exception as e:
+        status["healthy"] = False
+        status["components"]["pinecone"] = {"connected": False, "error": str(e)}
+        status["errors"].append(f"Pinecone connection failed: {e}")
+    
+    # Check 2: Embedding generation
+    try:
+        emb = await asyncio.wait_for(
+            asyncio.to_thread(get_embedding, "health check"),
+            timeout=min(RETRIEVAL_EMBEDDING_TIMEOUT, 5.0),
+        )
+        status["components"]["embeddings"] = {
+            "working": True,
+            "dimension": len(emb)
+        }
+    except Exception as e:
+        status["healthy"] = False
+        status["components"]["embeddings"] = {"working": False, "error": str(e)}
+        status["errors"].append(f"Embedding generation failed: {e}")
+    
+    # Check 3: Namespace resolution (if twin_id provided)
+    if twin_id:
+        try:
+            creator_id = resolve_creator_id_for_twin(twin_id)
+            namespaces = get_namespace_candidates_for_twin(twin_id, include_legacy=True)
+            
+            # Check vector counts per namespace
+            namespace_counts = {}
+            namespace_stats = getattr(stats, "namespaces", {}) if stats is not None else {}
+            for ns in namespaces:
+                ns_obj = namespace_stats.get(ns) if isinstance(namespace_stats, dict) else None
+                if isinstance(ns_obj, dict):
+                    count = int(ns_obj.get("vector_count", 0) or 0)
+                elif ns_obj is not None:
+                    count = int(getattr(ns_obj, "vector_count", 0) or 0)
+                else:
+                    count = 0
+                namespace_counts[ns] = count
+            
+            status["components"]["namespaces"] = {
+                "creator_id": creator_id,
+                "candidates": namespaces,
+                "vector_counts": namespace_counts
+            }
+            
+            # Warning if no vectors in any namespace
+            if all(count == 0 for count in namespace_counts.values()):
+                status["warnings"].append(f"No vectors found for twin {twin_id} in any namespace")
+        except Exception as e:
+            status["warnings"].append(f"Namespace resolution check failed: {e}")
+    
+    # Check 4: Configuration
+    dual_read = os.getenv("DELPHI_DUAL_READ", "true").lower() == "true"
+    status["configuration"] = {
+        "delphi_dual_read": dual_read,
+        "flashrank_available": _flashrank_available,
+        "query_prep_timeout_s": RETRIEVAL_QUERY_PREP_TIMEOUT,
+        "embedding_timeout_s": RETRIEVAL_EMBEDDING_TIMEOUT,
+        "vector_timeout_s": RETRIEVAL_VECTOR_TIMEOUT,
+        "per_namespace_timeout_s": RETRIEVAL_PER_NAMESPACE_TIMEOUT,
+    }
+    
+    if not dual_read:
+        status["warnings"].append("DELPHI_DUAL_READ is disabled - legacy namespaces may not be queried")
+    
+    return status

@@ -1,0 +1,356 @@
+"""
+Retrieval Pipeline Test Suite
+
+Comprehensive tests for the chat retrieval system.
+Covers unit tests for components and integration tests for the full pipeline.
+"""
+
+import pytest
+import asyncio
+from unittest.mock import Mock, patch, AsyncMock
+from typing import List, Dict, Any
+
+# Test configuration
+pytestmark = pytest.mark.asyncio
+
+
+class TestNamespaceResolution:
+    """Test namespace resolution functionality."""
+    
+    async def test_resolve_creator_id_returns_none_for_nonexistent_twin(self):
+        """Should return None when twin doesn't exist."""
+        from modules.delphi_namespace import resolve_creator_id_for_twin
+        
+        with patch('modules.delphi_namespace.supabase') as mock_supabase:
+            mock_supabase.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = []
+            
+            result = resolve_creator_id_for_twin("nonexistent-twin", _bypass_cache=True)
+            assert result is None
+    
+    async def test_resolve_creator_id_returns_creator_id(self):
+        """Should return creator_id when present in twin record."""
+        from modules.delphi_namespace import resolve_creator_id_for_twin, clear_creator_namespace_cache
+        
+        clear_creator_namespace_cache()
+        
+        with patch('modules.delphi_namespace.supabase') as mock_supabase:
+            mock_supabase.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = [
+                {"creator_id": "user.123", "tenant_id": "tenant_456"}
+            ]
+            
+            result = resolve_creator_id_for_twin("test-twin", _bypass_cache=True)
+            assert result == "user.123"
+    
+    async def test_resolve_creator_id_fallback_to_tenant(self):
+        """Should fallback to tenant-derived ID when creator_id is null."""
+        from modules.delphi_namespace import resolve_creator_id_for_twin, clear_creator_namespace_cache
+        
+        clear_creator_namespace_cache()
+        
+        with patch('modules.delphi_namespace.supabase') as mock_supabase:
+            mock_supabase.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = [
+                {"creator_id": None, "tenant_id": "tenant_789"}
+            ]
+            
+            result = resolve_creator_id_for_twin("test-twin", _bypass_cache=True)
+            assert result == "tenant_tenant_789"
+    
+    async def test_get_namespace_candidates_with_dual_read(self):
+        """Should return both namespaces when dual-read is enabled."""
+        from modules.delphi_namespace import get_namespace_candidates_for_twin
+        
+        with patch.dict('os.environ', {'DELPHI_DUAL_READ': 'true'}):
+            with patch('modules.delphi_namespace.resolve_creator_id_for_twin', return_value="user.123"):
+                result = get_namespace_candidates_for_twin("my-twin", include_legacy=True)
+                
+                assert len(result) == 2
+                assert "creator_user.123_twin_my-twin" in result
+                assert "my-twin" in result
+    
+    async def test_get_namespace_candidates_without_dual_read(self):
+        """Should return only primary namespace when dual-read is disabled."""
+        from modules.delphi_namespace import get_namespace_candidates_for_twin
+        
+        with patch.dict('os.environ', {'DELPHI_DUAL_READ': 'false'}):
+            with patch('modules.delphi_namespace.resolve_creator_id_for_twin', return_value="user.123"):
+                result = get_namespace_candidates_for_twin("my-twin", include_legacy=False)
+                
+                assert len(result) == 1
+                assert result[0] == "creator_user.123_twin_my-twin"
+
+
+class TestRetrievalPipeline:
+    """Test the full retrieval pipeline."""
+    
+    async def test_retrieve_context_empty_query(self):
+        """Should handle empty queries gracefully."""
+        from modules.retrieval import retrieve_context
+        
+        with patch('modules.retrieval.get_embeddings_async', return_value=[]):
+            result = await retrieve_context("", "test-twin")
+            assert isinstance(result, list)
+    
+    async def test_retrieve_context_with_owner_memory_match(self):
+        """Should return owner memory when match found."""
+        from modules.retrieval import retrieve_context_with_verified_first
+        
+        mock_memory = {
+            "id": "mem-123",
+            "value": "Owner's important memory",
+            "topic": "Important Topic"
+        }
+        
+        with patch('modules.retrieval._match_owner_memory', return_value=mock_memory):
+            with patch('modules.retrieval.get_default_group', side_effect=Exception("No group")):
+                result = await retrieve_context_with_verified_first(
+                    "test query", "test-twin", group_id=None
+                )
+                
+                assert len(result) == 1
+                assert result[0]["is_owner_memory"] is True
+                assert result[0]["text"] == "Owner's important memory"
+    
+    async def test_retrieve_context_with_verified_qna_match(self):
+        """Should return verified QnA when high-confidence match found."""
+        from modules.retrieval import retrieve_context_with_verified_first
+        
+        mock_verified = {
+            "id": "qna-456",
+            "question": "What is the answer?",
+            "answer": "The answer is 42",
+            "similarity_score": 0.85,
+            "citations": []
+        }
+        
+        with patch('modules.retrieval._match_owner_memory', return_value=None):
+            with patch('modules.retrieval.match_verified_qna', return_value=mock_verified):
+                with patch('modules.retrieval.get_default_group', side_effect=Exception("No group")):
+                    result = await retrieve_context_with_verified_first(
+                        "test query", "test-twin", group_id=None
+                    )
+                    
+                    assert len(result) == 1
+                    assert result[0]["is_verified"] is True
+                    assert result[0]["text"] == "The answer is 42"
+    
+    async def test_retrieve_context_falls_back_to_vectors(self):
+        """Should fallback to vector search when no verified match."""
+        from modules.retrieval import retrieve_context_with_verified_first
+        
+        with patch('modules.retrieval._match_owner_memory', return_value=None):
+            with patch('modules.retrieval.match_verified_qna', return_value=None):
+                with patch('modules.retrieval.retrieve_context_vectors', return_value=[
+                    {"text": "Vector result 1", "score": 0.8, "source_id": "src-1"},
+                    {"text": "Vector result 2", "score": 0.7, "source_id": "src-2"}
+                ]):
+                    with patch('modules.retrieval.get_default_group', side_effect=Exception("No group")):
+                        result = await retrieve_context_with_verified_first(
+                            "test query", "test-twin", group_id=None
+                        )
+                        
+                        assert len(result) == 2
+                        assert result[0]["text"] == "Vector result 1"
+
+
+class TestPineconeQueries:
+    """Test Pinecone query execution."""
+    
+    async def test_execute_pinecone_queries_with_timeout(self):
+        """Should handle timeout gracefully."""
+        from modules.retrieval import _execute_pinecone_queries
+        
+        mock_index = Mock()
+        mock_index.query = Mock(side_effect=asyncio.TimeoutError("Query timed out"))
+        
+        with patch('modules.retrieval.get_pinecone_index', return_value=mock_index):
+            with patch('modules.retrieval.get_namespace_candidates_for_twin', return_value=["ns-1"]):
+                result = await _execute_pinecone_queries(
+                    [[0.1, 0.2, 0.3]], "test-twin", timeout=0.1
+                )
+                # Should return empty list on timeout
+                assert result == []
+    
+    async def test_execute_pinecone_queries_merges_results(self):
+        """Should merge results from multiple namespaces."""
+        from modules.retrieval import _execute_pinecone_queries
+        
+        mock_response = Mock()
+        mock_response.matches = [
+            Mock(id="doc-1", score=0.9, metadata={"text": "Match 1"}),
+            Mock(id="doc-2", score=0.8, metadata={"text": "Match 2"})
+        ]
+        
+        mock_index = Mock()
+        mock_index.query = Mock(return_value=mock_response)
+        
+        with patch('modules.retrieval.get_pinecone_index', return_value=mock_index):
+            with patch('modules.retrieval.get_namespace_candidates_for_twin', return_value=["ns-1"]):
+                result = await _execute_pinecone_queries(
+                    [[0.1, 0.2, 0.3]], "test-twin"
+                )
+                
+                assert len(result) > 0
+                # First result is verified query, others are general
+                assert "matches" in result[0]
+
+
+class TestGroupFiltering:
+    """Test group permission filtering."""
+    
+    async def test_filter_by_group_allows_verified_memory(self):
+        """Should always allow verified memory regardless of group."""
+        from modules.retrieval import _filter_by_group_permissions
+        
+        contexts = [
+            {"text": "Verified answer", "source_id": "verified-1", "is_verified": True},
+            {"text": "Regular doc", "source_id": "doc-1", "is_verified": False}
+        ]
+        
+        with patch('modules.retrieval.supabase') as mock_supabase:
+            # Only doc-1 is allowed
+            mock_supabase.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value.data = [
+                {"content_id": "doc-1"}
+            ]
+            
+            result = _filter_by_group_permissions(contexts, "group-123")
+            
+            assert len(result) == 2  # Both allowed (verified + permitted)
+    
+    async def test_filter_by_group_rejects_unauthorized(self):
+        """Should reject contexts not in allowed group."""
+        from modules.retrieval import _filter_by_group_permissions
+        
+        contexts = [
+            {"text": "Doc 1", "source_id": "doc-1", "is_verified": False},
+            {"text": "Doc 2", "source_id": "doc-2", "is_verified": False}
+        ]
+        
+        with patch('modules.retrieval.supabase') as mock_supabase:
+            # Only doc-1 is allowed
+            mock_supabase.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value.data = [
+                {"content_id": "doc-1"}
+            ]
+            
+            result = _filter_by_group_permissions(contexts, "group-123")
+            
+            assert len(result) == 1
+            assert result[0]["source_id"] == "doc-1"
+
+
+class TestEmbeddingGeneration:
+    """Test embedding generation."""
+    
+    async def test_get_embeddings_async_batch(self):
+        """Should generate embeddings for multiple texts."""
+        from modules.embeddings import get_embeddings_async
+        
+        texts = ["Query 1", "Query 2", "Query 3"]
+        
+        with patch('modules.embeddings.get_embedding') as mock_get:
+            mock_get.return_value = [0.1] * 3072  # Mock 3072-dim embedding
+            
+            # For batch, it calls get_embedding multiple times
+            result = await get_embeddings_async(texts)
+            
+            assert len(result) == len(texts)
+            assert all(len(emb) == 3072 for emb in result)
+
+
+class TestHealthCheck:
+    """Test retrieval health check functionality."""
+    
+    async def test_get_retrieval_health_status_healthy(self):
+        """Should return healthy status when all components work."""
+        from modules.retrieval import get_retrieval_health_status
+        
+        with patch('modules.retrieval.get_pinecone_index') as mock_pc:
+            mock_stats = Mock()
+            mock_stats.total_vector_count = 1000
+            mock_stats.namespaces = {"ns-1": Mock(vector_count=500)}
+            mock_pc.return_value.describe_index_stats.return_value = mock_stats
+            
+            with patch('modules.retrieval.get_embedding', return_value=[0.1] * 3072):
+                with patch.dict('os.environ', {'DELPHI_DUAL_READ': 'true'}):
+                    result = await get_retrieval_health_status()
+                    
+                    assert result["healthy"] is True
+                    assert result["components"]["pinecone"]["connected"] is True
+                    assert result["components"]["embeddings"]["working"] is True
+    
+    async def test_get_retrieval_health_status_unhealthy(self):
+        """Should return unhealthy status when components fail."""
+        from modules.retrieval import get_retrieval_health_status
+        
+        with patch('modules.retrieval.get_pinecone_index', side_effect=Exception("Connection failed")):
+            result = await get_retrieval_health_status()
+            
+            assert result["healthy"] is False
+            assert len(result["errors"]) > 0
+
+
+class TestRRFMerge:
+    """Test Reciprocal Rank Fusion merging."""
+    
+    async def test_rrf_merge_combines_results(self):
+        """Should combine multiple result lists using RRF."""
+        from modules.retrieval import rrf_merge
+        
+        results_list = [
+            [
+                {"id": "doc-1", "score": 0.9, "metadata": {"text": "A"}},
+                {"id": "doc-2", "score": 0.8, "metadata": {"text": "B"}}
+            ],
+            [
+                {"id": "doc-2", "score": 0.85, "metadata": {"text": "B"}},
+                {"id": "doc-3", "score": 0.7, "metadata": {"text": "C"}}
+            ]
+        ]
+        
+        result = rrf_merge(results_list)
+        
+        # Should have 3 unique documents
+        assert len(result) == 3
+        # doc-2 appears in both lists, should have higher RRF score
+        doc2 = next(r for r in result if r["id"] == "doc-2")
+        assert "rrf_score" in doc2
+
+
+class TestEdgeCases:
+    """Test edge cases and error handling."""
+    
+    async def test_retrieve_context_handles_exception(self):
+        """Should handle exceptions gracefully and return empty list."""
+        from modules.retrieval import retrieve_context_with_verified_first
+        
+        with patch('modules.retrieval._match_owner_memory', side_effect=Exception("DB error")):
+            with patch('modules.retrieval.get_default_group', side_effect=Exception("No group")):
+                # Should not raise, should return empty list
+                result = await retrieve_context_with_verified_first("query", "twin")
+                assert isinstance(result, list)
+    
+    async def test_empty_namespace_list(self):
+        """Should handle empty namespace list."""
+        from modules.retrieval import _execute_pinecone_queries
+        
+        with patch('modules.retrieval.get_namespace_candidates_for_twin', return_value=[]):
+            result = await _execute_pinecone_queries([[0.1, 0.2]], "twin")
+            assert result == []
+    
+    async def test_all_namespaces_fail(self):
+        """Should handle when all namespace queries fail."""
+        from modules.retrieval import _execute_pinecone_queries
+        
+        mock_index = Mock()
+        mock_index.query = Mock(side_effect=Exception("Query failed"))
+        
+        with patch('modules.retrieval.get_pinecone_index', return_value=mock_index):
+            with patch('modules.retrieval.get_namespace_candidates_for_twin', return_value=["ns-1", "ns-2"]):
+                result = await _execute_pinecone_queries([[0.1, 0.2]], "twin")
+
+                # Fail-fast behavior: if no namespace succeeds, return [].
+                assert result == []
+
+
+# Run tests if executed directly
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

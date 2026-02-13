@@ -69,6 +69,7 @@ def print_feature_flag_summary():
     sys.stdout.flush()
 
 app = FastAPI(title="Verified Digital Twin Brain API")
+APP_STARTED_AT = time.time()
 
 # Add Dynamic CORS middleware with wildcard pattern support
 # Supports *.vercel.app for preview deployments
@@ -165,28 +166,54 @@ print_feature_flag_summary()
 
 @app.get("/health", tags=["health"])
 async def health_check():
-    """Health check endpoint for deployment readiness probes."""
-    # Include ingestion diagnostics schema availability for fast debug in production.
-    try:
-        from modules.ingestion_diagnostics import diagnostics_schema_status
+    """
+    Lightweight liveness endpoint.
 
-        diag_ok, _diag_err = diagnostics_schema_status()
-    except Exception:
-        diag_ok = False
-
+    Keep this endpoint dependency-free and fast so probes don't get blocked by
+    external systems (Supabase/Pinecone/etc.) during transient saturation.
+    """
+    uptime_seconds = int(time.time() - APP_STARTED_AT)
     return {
         "status": "healthy",
         "service": "verified-digital-twin-brain-api",
         "version": "1.0.0",
-        "ingestion_diagnostics_schema": {
-            "available": bool(diag_ok),
-        },
+        "uptime_seconds": uptime_seconds,
     }
 
 @app.get("/", tags=["health"])
 async def root_health():
     """Fallback health check for platforms checking the root path."""
     return await health_check()
+
+
+@app.get("/health/deep", tags=["health"])
+async def health_deep():
+    """
+    Deeper health/debug endpoint.
+
+    This is intentionally separate from `/health` so production liveness probes
+    stay cheap and resilient.
+    """
+    diag_ok = False
+    diag_err = None
+    try:
+        from modules.ingestion_diagnostics import diagnostics_schema_status
+
+        diag_ok, diag_err = diagnostics_schema_status()
+    except Exception as e:
+        diag_ok = False
+        diag_err = str(e)
+
+    return {
+        "status": "healthy",
+        "service": "verified-digital-twin-brain-api",
+        "version": "1.0.0",
+        "uptime_seconds": int(time.time() - APP_STARTED_AT),
+        "ingestion_diagnostics_schema": {
+            "available": bool(diag_ok),
+            "error": diag_err,
+        },
+    }
 
 # ============================================================================
 # P0 Deployment: Version Endpoint for Deployment Verification
@@ -325,7 +352,51 @@ sys.stdout.flush()
 async def startup_event():
     print("READY: Event loop running, accepting traffic.")
     print(f"DEBUG: Listening for Probes on: http://0.0.0.0:{os.getenv('PORT', '8000')}")
+    
+    # PHASE 1 FIX: Clear namespace cache on startup to prevent stale creator_id resolution
+    try:
+        from modules.delphi_namespace import clear_creator_namespace_cache
+        clear_creator_namespace_cache()
+        print("[Startup] Namespace cache cleared")
+    except Exception as e:
+        print(f"[Startup] Warning: Could not clear namespace cache: {e}")
+    
+    # PHASE 1 FIX: Run retrieval system diagnostics
+    try:
+        await _run_retrieval_diagnostics()
+    except Exception as e:
+        print(f"[Startup] Retrieval diagnostics failed: {e}")
+    
     sys.stdout.flush()
+
+
+async def _run_retrieval_diagnostics():
+    """Run diagnostics on retrieval system during startup."""
+    print("[Startup] Running retrieval system diagnostics...")
+    
+    # Check 1: Pinecone connection
+    try:
+        from modules.clients import get_pinecone_index
+        index = get_pinecone_index()
+        stats = index.describe_index_stats()
+        print(f"[Startup] ✓ Pinecone connected: {stats.total_vector_count} total vectors")
+    except Exception as e:
+        print(f"[Startup] ✗ Pinecone connection failed: {e}")
+        return
+    
+    # Check 2: Embedding generation
+    try:
+        from modules.embeddings import get_embedding
+        emb = get_embedding("diagnostic test")
+        print(f"[Startup] ✓ Embeddings working: {len(emb)} dimensions")
+    except Exception as e:
+        print(f"[Startup] ✗ Embeddings failed: {e}")
+    
+    # Check 3: Namespace configuration
+    dual_read = os.getenv("DELPHI_DUAL_READ", "true").lower() == "true"
+    print(f"[Startup] DELPHI_DUAL_READ: {dual_read} (queries both legacy and new namespaces)")
+    
+    print("[Startup] Retrieval diagnostics complete")
 
 
 # Startup Logic

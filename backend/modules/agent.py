@@ -605,7 +605,6 @@ async def realizer_node(state: TwinState):
         }
     except Exception as e:
         print(f"Realizer error: {e}")
-        from langchain_core.messages import AIMessage
         return {"messages": [AIMessage(content="I'm having trouble finding the words right now.")]}
 
 def create_twin_agent(

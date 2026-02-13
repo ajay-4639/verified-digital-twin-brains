@@ -3,7 +3,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useTwin } from '@/lib/context/TwinContext';
-import { API_BASE_URL } from '@/lib/constants';
 
 // Specialization icons
 const SPEC_ICONS: Record<string, string> = {
@@ -38,7 +37,8 @@ export const TwinSelector: React.FC = () => {
     };
 
     const handleCreateNew = () => {
-        // Clear the existing twin check so onboarding shows
+        // Signal onboarding to force "create new" mode.
+        localStorage.setItem('forceCreateTwin', '1');
         localStorage.removeItem('activeTwinId');
         router.push('/onboarding?new=1');
     };

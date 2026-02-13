@@ -26,9 +26,8 @@ const getOnboardingTwinStorageKey = (userId: string) => `onboardingTwinId:${user
 export default function OnboardingPage() {
   const router = useRouter();
   const supabase = getSupabaseClient();
-  const forceNewTwin =
-    typeof window !== 'undefined' &&
-    new URLSearchParams(window.location.search).get('new') === '1';
+  const [forceNewTwin, setForceNewTwin] = useState(false);
+  const [forceNewReady, setForceNewReady] = useState(false);
 
   // State
   const [currentStep, setCurrentStep] = useState(0);
@@ -55,8 +54,28 @@ export default function OnboardingPage() {
   const [pendingUrls, setPendingUrls] = useState<string[]>([]);
   const [faqs, setFaqs] = useState<FAQPair[]>([]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const fromQuery = new URLSearchParams(window.location.search).get('new') === '1';
+    const fromStorage = localStorage.getItem('forceCreateTwin') === '1';
+    const forceCreate = fromQuery || fromStorage;
+
+    // One-shot flag from TwinSelector.
+    if (fromStorage) {
+      localStorage.removeItem('forceCreateTwin');
+    }
+
+    setForceNewTwin(forceCreate);
+    setForceNewReady(true);
+  }, []);
+
   // Check if should skip onboarding (returning user with existing twins)
   useEffect(() => {
+    if (!forceNewReady) {
+      return;
+    }
+
     const checkExistingTwins = async () => {
       if (forceNewTwin) {
         return;
@@ -75,7 +94,7 @@ export default function OnboardingPage() {
       }
     };
     checkExistingTwins();
-  }, [router, forceNewTwin]);
+  }, [router, forceNewTwin, forceNewReady]);
 
   const handleStepChange = async (newStep: number) => {
     // Moving from Step 1 to Step 2: Create twin

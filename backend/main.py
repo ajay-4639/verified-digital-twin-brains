@@ -14,7 +14,6 @@ from routers import (
     persona_specs,
     decision_capture,
     ingestion,
-    ingestion_realtime,
     youtube_preflight,
     twins,
     actions,
@@ -42,6 +41,11 @@ from routers import (
     retrieval_delphi,
 )
 from modules.specializations import get_specialization
+
+try:
+    from routers import ingestion_realtime
+except ImportError:
+    ingestion_realtime = None
 
 # ISSUE-003: Feature flag definitions (moved here for proper ordering)
 # Realtime ingestion is now enabled by default. Set ENABLE_REALTIME_INGESTION=false to disable.
@@ -93,8 +97,11 @@ app.include_router(decision_capture.router)
 app.include_router(ingestion.router)
 # Use feature flags defined at top of file
 if REALTIME_INGESTION_ENABLED:
-    app.include_router(ingestion_realtime.router)
-    print("[INFO] Realtime ingestion routes enabled (ENABLE_REALTIME_INGESTION=true)")
+    if ingestion_realtime is not None:
+        app.include_router(ingestion_realtime.router)
+        print("[INFO] Realtime ingestion routes enabled (ENABLE_REALTIME_INGESTION=true)")
+    else:
+        print("[WARN] Realtime ingestion requested but router module is unavailable")
 else:
     print("[INFO] Realtime ingestion routes disabled (ENABLE_REALTIME_INGESTION=false)")
 app.include_router(youtube_preflight.router)

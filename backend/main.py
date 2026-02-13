@@ -360,43 +360,7 @@ async def startup_event():
         print("[Startup] Namespace cache cleared")
     except Exception as e:
         print(f"[Startup] Warning: Could not clear namespace cache: {e}")
-    
-    # PHASE 1 FIX: Run retrieval system diagnostics
-    try:
-        await _run_retrieval_diagnostics()
-    except Exception as e:
-        print(f"[Startup] Retrieval diagnostics failed: {e}")
-    
     sys.stdout.flush()
-
-
-async def _run_retrieval_diagnostics():
-    """Run diagnostics on retrieval system during startup."""
-    print("[Startup] Running retrieval system diagnostics...")
-    
-    # Check 1: Pinecone connection
-    try:
-        from modules.clients import get_pinecone_index
-        index = get_pinecone_index()
-        stats = index.describe_index_stats()
-        print(f"[Startup] ✓ Pinecone connected: {stats.total_vector_count} total vectors")
-    except Exception as e:
-        print(f"[Startup] ✗ Pinecone connection failed: {e}")
-        return
-    
-    # Check 2: Embedding generation
-    try:
-        from modules.embeddings import get_embedding
-        emb = get_embedding("diagnostic test")
-        print(f"[Startup] ✓ Embeddings working: {len(emb)} dimensions")
-    except Exception as e:
-        print(f"[Startup] ✗ Embeddings failed: {e}")
-    
-    # Check 3: Namespace configuration
-    dual_read = os.getenv("DELPHI_DUAL_READ", "true").lower() == "true"
-    print(f"[Startup] DELPHI_DUAL_READ: {dual_read} (queries both legacy and new namespaces)")
-    
-    print("[Startup] Retrieval diagnostics complete")
 
 
 # Startup Logic

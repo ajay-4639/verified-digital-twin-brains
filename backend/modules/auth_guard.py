@@ -28,21 +28,29 @@ import time
 from typing import Optional, Dict, Any, Tuple
 from functools import wraps
 from datetime import datetime, timedelta
+from pathlib import Path
 
 # Import json for type hints
 import json
 
 # FastAPI imports for dependencies
 from fastapi import Header, HTTPException, status, Depends, Request
+from dotenv import load_dotenv
+
+# Ensure env files are loaded before reading auth settings.
+_ROOT_ENV = Path(__file__).resolve().parents[2] / ".env"
+_BACKEND_ENV = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(_ROOT_ENV, override=False)
+load_dotenv(_BACKEND_ENV, override=False)
 
 # Security configuration from environment
-JWT_SECRET = os.getenv("JWT_SECRET", os.getenv("SUPABASE_JWT_SECRET", ""))
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "authenticated")
 
 # Security hardening flags
 STRICT_MODE = os.getenv("AUTH_STRICT_MODE", "true").lower() == "true"
 MAX_TOKEN_AGE_SECONDS = int(os.getenv("MAX_TOKEN_AGE_SECONDS", "3600"))  # 1 hour default
+JWT_CLOCK_SKEW_SECONDS = int(os.getenv("JWT_CLOCK_SKEW_SECONDS", "600"))  # 10 min default
 
 
 class AuthenticationError(Exception):
@@ -109,7 +117,8 @@ def verify_token_signature(token: str) -> Tuple[bool, Dict[str, Any]]:
     Returns:
         Tuple of (is_valid, payload_or_error)
     """
-    if not JWT_SECRET:
+    jwt_secret = os.getenv("JWT_SECRET", os.getenv("SUPABASE_JWT_SECRET", ""))
+    if not jwt_secret:
         if STRICT_MODE:
             raise AuthenticationError("JWT_SECRET not configured and strict mode enabled")
         # In non-strict mode without secret, we can't verify
@@ -119,12 +128,13 @@ def verify_token_signature(token: str) -> Tuple[bool, Dict[str, Any]]:
     try:
         payload = jwt.decode(
             token,
-            JWT_SECRET,
+            jwt_secret,
             algorithms=[JWT_ALGORITHM],
             audience=JWT_AUDIENCE,
+            leeway=JWT_CLOCK_SKEW_SECONDS,
             options={
                 "verify_exp": True,
-                "verify_iat": True,
+                "verify_iat": False,
                 "verify_signature": True,
                 "require": ["exp", "iat", "sub"]
             }
@@ -162,7 +172,7 @@ def verify_token_expiration(payload: Dict[str, Any]) -> Tuple[bool, str]:
     if iat:
         issued_at = datetime.utcfromtimestamp(iat)
         # Token issued in the future (clock skew or attack)
-        if issued_at > now + timedelta(minutes=5):
+        if issued_at > now + timedelta(seconds=JWT_CLOCK_SKEW_SECONDS):
             return False, "Token issued in the future"
         
         # Token too old (even if not expired)
@@ -410,7 +420,8 @@ def get_current_user(
                 pass
 
         return auth_context
-    except AuthenticationError:
+    except AuthenticationError as exc:
+        print(f"[auth_guard] get_current_user auth failed: {exc}")
         return None
 
 

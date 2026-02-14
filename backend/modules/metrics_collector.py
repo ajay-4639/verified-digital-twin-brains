@@ -1,286 +1,302 @@
-"""
-Metrics Collection Module
+# backend/modules/metrics_collector.py
+"""Metrics Collector for Langfuse Data
 
-Collects and stores performance metrics for observability:
-- Request latency (retrieval, LLM, total)
-- Token usage per request
-- Error counts
-- Service health
+Collects and aggregates metrics from Langfuse for dashboard APIs.
 """
 
-from typing import Dict, Any, Optional
+import os
+import logging
+from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
-from contextlib import contextmanager
-import time
-from modules.observability import supabase
+from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TimeRangeMetrics:
+    """Metrics for a time range."""
+    start_time: str
+    end_time: str
+    total_traces: int
+    error_count: int
+    error_rate: float
+    avg_latency_ms: float
+    p50_latency_ms: float
+    p95_latency_ms: float
+    p99_latency_ms: float
+    avg_quality_score: float
+    total_tokens: int
 
 
 class MetricsCollector:
-    """
-    Collect and store metrics for observability dashboard.
+    """Collects metrics from Langfuse."""
     
-    Usage:
-        collector = MetricsCollector(twin_id="...", user_id="...")
-        
-        with collector.measure("retrieval"):
-            # do retrieval
-            pass
-        
-        collector.record_tokens(prompt=100, completion=50)
-        collector.flush()
-    """
+    def __init__(self):
+        self._langfuse_available = False
+        self._init_langfuse()
     
-    def __init__(self, twin_id: Optional[str] = None, user_id: Optional[str] = None):
-        self.twin_id = twin_id
-        self.user_id = user_id
-        self.metrics_buffer = []
-        self.timings = {}
-        self.start_time = time.time()
-    
-    @contextmanager
-    def measure(self, operation: str):
-        """Context manager to measure operation duration."""
-        start = time.time()
+    def _init_langfuse(self):
+        """Initialize Langfuse client."""
         try:
-            yield
-        finally:
-            duration_ms = (time.time() - start) * 1000
-            self.timings[operation] = duration_ms
-            self._add_metric(f"{operation}_latency_ms", duration_ms)
-    
-    def record_latency(self, operation: str, duration_ms: float):
-        """Record a latency measurement directly."""
-        self.timings[operation] = duration_ms
-        self._add_metric(f"{operation}_latency_ms", duration_ms)
-    
-    def record_tokens(self, prompt: int = 0, completion: int = 0, total: Optional[int] = None):
-        """Record token usage."""
-        if total is None:
-            total = prompt + completion
-        
-        if prompt > 0:
-            self._add_metric("tokens_prompt", prompt)
-        if completion > 0:
-            self._add_metric("tokens_completion", completion)
-        if total > 0:
-            self._add_metric("tokens_total", total)
-    
-    def record_error(self, error_type: str = "general"):
-        """Record an error occurrence."""
-        self._add_metric("error_count", 1, {"error_type": error_type})
-    
-    def record_request(self):
-        """Record a request count."""
-        self._add_metric("request_count", 1)
-
-    def record_metric(self, metric_type: str, value: float = 1, metadata: Optional[Dict] = None):
-        """Record a custom metric."""
-        self._add_metric(metric_type, value, metadata)
-    
-    def _add_metric(self, metric_type: str, value: float, metadata: Optional[Dict] = None):
-        """Add metric to buffer."""
-        self.metrics_buffer.append({
-            "twin_id": self.twin_id,
-            "user_id": self.user_id,
-            "metric_type": metric_type,
-            "value": value,
-            "metadata": metadata or {},
-            "created_at": datetime.utcnow().isoformat()
-        })
-    
-    def flush(self):
-        """Flush all buffered metrics to database."""
-        if not self.metrics_buffer:
-            return
-        
-        # Add total latency
-        total_ms = (time.time() - self.start_time) * 1000
-        self._add_metric("total_latency_ms", total_ms)
-        
-        try:
-            # Batch insert all metrics
-            supabase.table("metrics").insert(self.metrics_buffer).execute()
+            from langfuse import Langfuse
+            
+            public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
+            secret_key = os.getenv("LANGFUSE_SECRET_KEY")
+            host = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
+            
+            if public_key and secret_key:
+                self._client = Langfuse(
+                    public_key=public_key,
+                    secret_key=secret_key,
+                    host=host,
+                )
+                self._langfuse_available = True
+                logger.info("Metrics Collector initialized")
         except Exception as e:
-            print(f"Error flushing metrics: {e}")
-        finally:
-            self.metrics_buffer = []
+            logger.warning(f"Langfuse not available for metrics: {e}")
     
-    def get_summary(self) -> Dict[str, Any]:
-        """Get summary of collected metrics."""
-        return {
-            "twin_id": self.twin_id,
-            "timings": self.timings,
-            "total_elapsed_ms": (time.time() - self.start_time) * 1000
-        }
-
-
-def get_metrics_summary(twin_id: Optional[str] = None, days: int = 7) -> Dict[str, Any]:
-    """
-    Get metrics summary for a twin or all twins.
-    
-    Returns aggregated metrics for the specified time period.
-    """
-    since = (datetime.utcnow() - timedelta(days=days)).isoformat()
-    
-    try:
-        query = supabase.table("metrics").select("*").gte("created_at", since)
+    async def get_quality_metrics(
+        self,
+        from_time: datetime,
+        to_time: datetime,
+        interval: str = "hour"  # "hour", "day"
+    ) -> List[Dict[str, Any]]:
+        """
+        Get quality metrics over time.
         
-        if twin_id:
-            query = query.eq("twin_id", twin_id)
+        Args:
+            from_time: Start time
+            to_time: End time
+            interval: Aggregation interval
         
-        result = query.execute()
-        
-        if not result.data:
-            return {"total_requests": 0, "metrics": {}}
-        
-        # Aggregate by metric type
-        aggregates = {}
-        for row in result.data:
-            metric_type = row["metric_type"]
-            value = row["value"]
-            
-            if metric_type not in aggregates:
-                aggregates[metric_type] = {
-                    "count": 0,
-                    "sum": 0,
-                    "min": float("inf"),
-                    "max": float("-inf")
-                }
-            
-            agg = aggregates[metric_type]
-            agg["count"] += 1
-            agg["sum"] += value
-            agg["min"] = min(agg["min"], value)
-            agg["max"] = max(agg["max"], value)
-        
-        # Calculate averages
-        for metric_type, agg in aggregates.items():
-            agg["avg"] = agg["sum"] / agg["count"] if agg["count"] > 0 else 0
-        
-        # Extract key metrics
-        request_count = aggregates.get("request_count", {}).get("sum", 0)
-        token_total = aggregates.get("tokens_total", {}).get("sum", 0)
-        avg_latency = aggregates.get("total_latency_ms", {}).get("avg", 0)
-        error_count = aggregates.get("error_count", {}).get("sum", 0)
-        
-        return {
-            "total_requests": int(request_count),
-            "total_tokens": int(token_total),
-            "avg_latency_ms": round(avg_latency, 2),
-            "error_count": int(error_count),
-            "error_rate": round(error_count / request_count * 100, 2) if request_count > 0 else 0,
-            "metrics": aggregates,
-            "period_days": days
-        }
-        
-    except Exception as e:
-        print(f"Error getting metrics summary: {e}")
-        return {"error": str(e), "total_requests": 0}
-
-
-def get_usage_by_twin(days: int = 7) -> list:
-    """Get token usage breakdown by twin."""
-    since = (datetime.utcnow() - timedelta(days=days)).isoformat()
-    
-    try:
-        result = supabase.table("metrics").select(
-            "twin_id, value"
-        ).eq("metric_type", "tokens_total").gte("created_at", since).execute()
-        
-        if not result.data:
+        Returns:
+            List of metric points
+        """
+        if not self._langfuse_available:
             return []
         
-        # Aggregate by twin
-        by_twin = {}
-        for row in result.data:
-            twin_id = row["twin_id"]
-            if twin_id not in by_twin:
-                by_twin[twin_id] = 0
-            by_twin[twin_id] += row["value"]
-        
-        # Sort by usage
-        return sorted(
-            [{"twin_id": k, "tokens": int(v)} for k, v in by_twin.items()],
-            key=lambda x: x["tokens"],
-            reverse=True
-        )
-        
-    except Exception as e:
-        print(f"Error getting usage by twin: {e}")
-        return []
-
-
-def check_quota(tenant_id: str, quota_type: str = "daily_tokens", increment: int = 0) -> Dict[str, Any]:
-    """
-    Check if tenant has quota available and optionally increment usage.
+        try:
+            # Fetch overall_quality scores
+            scores = self._client.fetch_scores(
+                name="overall_quality",
+                from_timestamp=from_time.isoformat(),
+                to_timestamp=to_time.isoformat()
+            )
+            
+            # Group by interval
+            buckets = {}
+            for score in scores:
+                timestamp = datetime.fromisoformat(score.timestamp.replace('Z', '+00:00'))
+                
+                if interval == "hour":
+                    bucket_key = timestamp.strftime("%Y-%m-%d %H:00")
+                else:
+                    bucket_key = timestamp.strftime("%Y-%m-%d")
+                
+                if bucket_key not in buckets:
+                    buckets[bucket_key] = []
+                buckets[bucket_key].append(score.value)
+            
+            # Calculate averages per bucket
+            results = []
+            for bucket_key, values in sorted(buckets.items()):
+                results.append({
+                    "timestamp": bucket_key,
+                    "avg_score": round(sum(values) / len(values), 3),
+                    "min_score": round(min(values), 3),
+                    "max_score": round(max(values), 3),
+                    "count": len(values)
+                })
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Failed to get quality metrics: {e}")
+            return []
     
-    Returns: {"allowed": bool, "current_usage": int, "limit": int}
-    """
-    try:
-        result = supabase.rpc("increment_quota_usage", {
-            "p_tenant_id": tenant_id,
-            "p_quota_type": quota_type,
-            "p_increment": increment
-        }).execute()
+    async def get_latency_metrics(
+        self,
+        from_time: datetime,
+        to_time: datetime
+    ) -> Dict[str, Any]:
+        """Get latency metrics for a time range."""
+        if not self._langfuse_available:
+            return {}
         
-        if result.data and len(result.data) > 0:
-            row = result.data[0]
+        try:
+            traces = self._client.fetch_traces(
+                from_timestamp=from_time.isoformat(),
+                to_timestamp=to_time.isoformat()
+            )
+            
+            latencies = [t.latency for t in traces if hasattr(t, 'latency') and t.latency]
+            
+            if not latencies:
+                return {}
+            
+            latencies.sort()
+            n = len(latencies)
+            
             return {
-                "allowed": row["allowed"],
-                "current_usage": row["current_usage"],
-                "limit": row["limit_value"],
-                "remaining": row["limit_value"] - row["current_usage"]
+                "count": n,
+                "avg_ms": round(sum(latencies) / n, 2),
+                "p50_ms": latencies[int(n * 0.5)],
+                "p95_ms": latencies[int(n * 0.95)],
+                "p99_ms": latencies[int(n * 0.99)],
+                "min_ms": latencies[0],
+                "max_ms": latencies[-1]
             }
-        
-        # Fallback if no result
-        return {"allowed": True, "current_usage": 0, "limit": 100000, "remaining": 100000}
-        
-    except Exception as e:
-        print(f"Error checking quota: {e}")
-        # On error, allow the request (fail open for beta)
-        return {"allowed": True, "current_usage": 0, "limit": 100000, "remaining": 100000, "error": str(e)}
-
-
-def log_service_health(service_name: str, status: str, response_time_ms: Optional[float] = None, 
-                       error_message: Optional[str] = None):
-    """Log a service health check result."""
-    try:
-        supabase.table("service_health_logs").insert({
-            "service_name": service_name,
-            "status": status,
-            "response_time_ms": response_time_ms,
-            "error_message": error_message,
-            "created_at": datetime.utcnow().isoformat()
-        }).execute()
-    except Exception as e:
-        print(f"Error logging health: {e}")
-
-
-def get_recent_health(hours: int = 24) -> Dict[str, Any]:
-    """Get recent health status for all services."""
-    since = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+            
+        except Exception as e:
+            logger.error(f"Failed to get latency metrics: {e}")
+            return {}
     
-    try:
-        result = supabase.table("service_health_logs").select(
-            "service_name, status, response_time_ms, created_at"
-        ).gte("created_at", since).order("created_at", desc=True).limit(100).execute()
+    async def get_error_metrics(
+        self,
+        from_time: datetime,
+        to_time: datetime
+    ) -> Dict[str, Any]:
+        """Get error metrics for a time range."""
+        if not self._langfuse_available:
+            return {}
         
-        if not result.data:
-            return {"services": {}}
+        try:
+            traces = self._client.fetch_traces(
+                from_timestamp=from_time.isoformat(),
+                to_timestamp=to_time.isoformat()
+            )
+            
+            total = len(traces)
+            errors = sum(1 for t in traces if t.metadata.get("error", False))
+            
+            # Group by error type
+            error_types = {}
+            for t in traces:
+                if t.metadata.get("error"):
+                    error_type = t.metadata.get("error_type", "unknown")
+                    error_types[error_type] = error_types.get(error_type, 0) + 1
+            
+            return {
+                "total_traces": total,
+                "error_count": errors,
+                "error_rate": round(errors / total * 100, 2) if total > 0 else 0,
+                "error_types": error_types
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get error metrics: {e}")
+            return {}
+    
+    async def get_persona_metrics(
+        self,
+        from_time: datetime,
+        to_time: datetime
+    ) -> Dict[str, Any]:
+        """Get persona compliance metrics."""
+        if not self._langfuse_available:
+            return {}
         
-        # Get latest status per service
-        services = {}
-        for row in result.data:
-            svc = row["service_name"]
-            if svc not in services:
-                services[svc] = {
-                    "status": row["status"],
-                    "last_check": row["created_at"],
-                    "avg_response_ms": row["response_time_ms"]
-                }
+        try:
+            scores = {}
+            for score_name in ["persona_overall", "persona_structure_policy", "persona_voice_fidelity"]:
+                try:
+                    score_data = self._client.fetch_scores(
+                        name=score_name,
+                        from_timestamp=from_time.isoformat(),
+                        to_timestamp=to_time.isoformat()
+                    )
+                    if score_data:
+                        values = [s.value for s in score_data]
+                        scores[score_name] = {
+                            "avg": round(sum(values) / len(values), 3),
+                            "count": len(values)
+                        }
+                except Exception:
+                    pass
+            
+            # Count rewrites
+            try:
+                rewrite_scores = self._client.fetch_scores(
+                    name="persona_rewrite_applied",
+                    from_timestamp=from_time.isoformat(),
+                    to_timestamp=to_time.isoformat()
+                )
+                rewrite_count = sum(1 for s in rewrite_scores if s.value)
+                scores["rewrite_count"] = rewrite_count
+            except Exception:
+                pass
+            
+            return scores
+            
+        except Exception as e:
+            logger.error(f"Failed to get persona metrics: {e}")
+            return {}
+    
+    async def get_dataset_stats(self) -> Dict[str, Any]:
+        """Get dataset statistics."""
+        if not self._langfuse_available:
+            return {}
         
-        return {"services": services, "period_hours": hours}
+        try:
+            stats = {}
+            for dataset_name in ["high_quality_responses", "needs_improvement"]:
+                try:
+                    dataset = self._client.get_dataset(dataset_name)
+                    items = list(dataset.items)
+                    
+                    # Calculate average score
+                    scores = [item.metadata.get("overall_score", 0) for item in items if item.metadata]
+                    avg_score = sum(scores) / len(scores) if scores else 0
+                    
+                    stats[dataset_name] = {
+                        "item_count": len(items),
+                        "avg_score": round(avg_score, 3)
+                    }
+                except Exception:
+                    stats[dataset_name] = {"item_count": 0, "avg_score": 0}
+            
+            return stats
+            
+        except Exception as e:
+            logger.error(f"Failed to get dataset stats: {e}")
+            return {}
+    
+    async def get_full_dashboard_metrics(
+        self,
+        hours: int = 24
+    ) -> Dict[str, Any]:
+        """Get all metrics for dashboard in one call."""
+        to_time = datetime.utcnow()
+        from_time = to_time - timedelta(hours=hours)
         
-    except Exception as e:
-        print(f"Error getting health: {e}")
-        return {"error": str(e), "services": {}}
+        quality = await self.get_quality_metrics(from_time, to_time, interval="hour")
+        latency = await self.get_latency_metrics(from_time, to_time)
+        errors = await self.get_error_metrics(from_time, to_time)
+        persona = await self.get_persona_metrics(from_time, to_time)
+        datasets = await self.get_dataset_stats()
+        
+        return {
+            "time_range": {
+                "from": from_time.isoformat(),
+                "to": to_time.isoformat(),
+                "hours": hours
+            },
+            "quality": quality,
+            "latency": latency,
+            "errors": errors,
+            "persona": persona,
+            "datasets": datasets
+        }
+
+
+# Singleton instance
+_collector: Optional[MetricsCollector] = None
+
+
+def get_metrics_collector() -> MetricsCollector:
+    """Get or create the singleton collector."""
+    global _collector
+    if _collector is None:
+        _collector = MetricsCollector()
+    return _collector

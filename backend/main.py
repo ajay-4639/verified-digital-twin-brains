@@ -39,6 +39,20 @@ from routers import (
     verify,
     owner_memory,
     retrieval_delphi,
+    
+    # P2: Langfuse observability enhancements
+    regression_testing,
+    alerts,
+    langfuse_metrics,
+    dataset_export,
+    
+    # P3: Advanced observability
+    dashboard,
+    trace_compare,
+    prompt_playground,
+    ab_testing,
+    cost_tracking,
+    synthetic_monitoring,
 )
 from modules.specializations import get_specialization
 
@@ -139,6 +153,22 @@ if DELPHI_RETRIEVAL_ENABLED:
     print("[INFO] Delphi retrieval routes enabled (ENABLE_DELPHI_RETRIEVAL=true)")
 else:
     print("[INFO] Delphi retrieval routes disabled (ENABLE_DELPHI_RETRIEVAL=false)")
+
+# P2: Langfuse observability routers
+app.include_router(regression_testing.router)
+app.include_router(alerts.router)
+app.include_router(langfuse_metrics.router)
+app.include_router(dataset_export.router)
+print("[INFO] Langfuse P2 observability routes enabled (regression, alerts, metrics, export)")
+
+# P3: Advanced observability routes
+app.include_router(dashboard.router)
+app.include_router(trace_compare.router)
+app.include_router(prompt_playground.router)
+app.include_router(ab_testing.router)
+app.include_router(cost_tracking.router)
+app.include_router(synthetic_monitoring.router)
+print("[INFO] Langfuse P3 observability routes enabled (dashboard, trace-compare, playground, ab-testing, costs, monitoring)")
 
 
 # Print feature flag summary after all routers loaded

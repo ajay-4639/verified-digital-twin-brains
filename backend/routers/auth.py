@@ -14,6 +14,12 @@ from modules.observability import supabase
 
 router = APIRouter(tags=["auth"])
 
+
+def _require_auth_user(user: Any) -> Dict[str, Any]:
+    if not isinstance(user, dict) or not user.get("user_id"):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return user
+
 # ============================================================================
 # User Registration & Profile
 # ============================================================================
@@ -40,6 +46,7 @@ async def sync_user(request: Request, response: Response, user=Depends(get_curre
     Called after OAuth/magic link login to ensure user exists in our DB.
     Creates user record and default tenant if first login.
     """
+    user = _require_auth_user(user)
     correlation_id = request.headers.get("x-correlation-id") or request.headers.get("x-request-id") or "none"
     response.headers["x-correlation-id"] = correlation_id
 
@@ -153,6 +160,7 @@ async def whoami(user=Depends(get_current_user)):
     Use this to verify auth is working and tenant_id is correctly resolved.
     This endpoint uses resolve_tenant_id to ensure tenant always exists.
     """
+    user = _require_auth_user(user)
     user_id = user.get("user_id")
     email = user.get("email", "")
     
@@ -174,6 +182,7 @@ async def whoami(user=Depends(get_current_user)):
 @router.get("/auth/me", response_model=UserProfile)
 async def get_current_user_profile(user=Depends(get_current_user)):
     """Get current user's profile including tenant and onboarding status."""
+    user = _require_auth_user(user)
     user_id = user.get("user_id")
     
     # Get user with tenant
@@ -212,6 +221,7 @@ async def get_my_twins(user=Depends(get_current_user)):
     Uses resolve_tenant_id to ensure tenant is always resolved,
     auto-creating if necessary. Also includes auto-repair for orphaned twins.
     """
+    user = _require_auth_user(user)
     user_id = user.get("user_id")
     email = user.get("email", "")
     

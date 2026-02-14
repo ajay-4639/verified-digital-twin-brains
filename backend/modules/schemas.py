@@ -9,6 +9,7 @@ class ChatRequest(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
     mode: Optional[str] = None  # Deprecated: ignored for auth/routing decisions
     training_session_id: Optional[str] = None
+    trace_id: Optional[str] = None  # Langfuse trace ID for observability linking
     # Compatibility: accept legacy {message} payloads for one release window
     message: Optional[str] = None
 
@@ -307,6 +308,7 @@ class ChatWidgetRequest(BaseModel):
 class PublicChatRequest(BaseModel):
     message: str
     conversation_history: Optional[List[Dict[str, Any]]] = None
+    trace_id: Optional[str] = None  # Langfuse trace ID for observability linking
 
 # Owner Memory + Clarifications
 

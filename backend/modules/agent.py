@@ -9,10 +9,19 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 try:
     from langfuse import observe
+    try:
+        from langfuse.decorators import langfuse_context
+    except ImportError:
+        from langfuse import langfuse_context
 except ImportError:
     def observe(*args, **kwargs):
         def decorator(func): return func
         return decorator
+    
+    class _MockLangfuseContext:
+        def update_current_trace(self, *args, **kwargs): pass
+        def update_current_observation(self, *args, **kwargs): pass
+    langfuse_context = _MockLangfuseContext()
 
 from modules.tools import get_retrieval_tool
 from modules.observability import supabase
@@ -503,31 +512,43 @@ async def router_node(state: TwinState):
     generic_coaching_heuristic = _is_generic_business_coaching_query(last_human_msg)
     explicit_source_grounded = _is_explicit_source_grounded_query(last_human_msg)
     
-    router_prompt = f"""You are a Strategic Dialogue Router for a Digital Twin.
-    Classify the user's intent to determine retrieval and evidence requirements.
-    
-    USER QUERY: {last_human_msg}
-    INTERACTION CONTEXT: {interaction_context}
-    
-    MODES:
-    - SMALLTALK: Greetings, brief pleasantries, "how are you".
-    - QA_FACT: Questions about objective facts, events, or public knowledge.
-    - QA_RELATIONSHIP: Questions about people, entities, or connections (Graph needed).
-    - STANCE_GLOBAL: Questions about beliefs, opinions, core philosophy, or "what do I think about".
-    - REPAIR: User complaining about being robotic, generic, or incorrect.
-    - TEACHING: Only when user explicitly asks to teach/correct OR context is owner_training and evidence is missing.
-    
-    INTENT ATTRIBUTES:
-    - is_person_specific: True if the question asks for MY (the owner's) specific view, decision, preference, or experience.
-    
-    OUTPUT FORMAT (JSON):
-    {{
-        "mode": "SMALLTALK | QA_FACT | QA_RELATIONSHIP | STANCE_GLOBAL | REPAIR | TEACHING",
-        "is_person_specific": bool,
-        "requires_evidence": bool,
-        "reasoning": "Brief explanation"
-    }}
-    """
+    # Try to use Langfuse-managed prompt, fallback to inline
+    try:
+        from modules.langfuse_prompt_manager import compile_prompt
+        router_prompt = compile_prompt(
+            "router",
+            variables={
+                "user_query": last_human_msg,
+                "interaction_context": interaction_context,
+            }
+        )
+    except Exception:
+        # Fallback to inline prompt
+        router_prompt = f"""You are a Strategic Dialogue Router for a Digital Twin.
+Classify the user's intent to determine retrieval and evidence requirements.
+
+USER QUERY: {last_human_msg}
+INTERACTION CONTEXT: {interaction_context}
+
+MODES:
+- SMALLTALK: Greetings, brief pleasantries, "how are you".
+- QA_FACT: Questions about objective facts, events, or public knowledge.
+- QA_RELATIONSHIP: Questions about people, entities, or connections (Graph needed).
+- STANCE_GLOBAL: Questions about beliefs, opinions, core philosophy, or "what do I think about".
+- REPAIR: User complaining about being robotic, generic, or incorrect.
+- TEACHING: Only when user explicitly asks to teach/correct OR context is owner_training and evidence is missing.
+
+INTENT ATTRIBUTES:
+- is_person_specific: True if the question asks for MY (the owner's) specific view, decision, preference, or experience.
+
+OUTPUT FORMAT (JSON):
+{{
+    "mode": "SMALLTALK | QA_FACT | QA_RELATIONSHIP | STANCE_GLOBAL | REPAIR | TEACHING",
+    "is_person_specific": bool,
+    "requires_evidence": bool,
+    "reasoning": "Brief explanation"
+}}
+"""
     
     try:
         plan, _route_meta = await invoke_json(
@@ -603,6 +624,20 @@ async def router_node(state: TwinState):
         }
     except Exception as e:
         print(f"Router error: {e}")
+        # Tag error in Langfuse
+        try:
+            langfuse_context.update_current_observation(
+                level="ERROR",
+                status_message=f"Router failed: {str(e)[:255]}",
+                metadata={
+                    "error": True,
+                    "error_type": type(e).__name__,
+                    "error_node": "router_node",
+                    "query": last_human_msg[:200] if last_human_msg else None,
+                }
+            )
+        except Exception:
+            pass
         if _is_smalltalk_query(last_human_msg):
             fallback_intent = classify_query_intent(last_human_msg, dialogue_mode="SMALLTALK")
             return {
@@ -619,6 +654,7 @@ async def router_node(state: TwinState):
             "sub_queries": [last_human_msg],
         }
 
+@observe(name="evidence_gate_node")
 async def evidence_gate_node(state: TwinState):
     """Phase 4: Evidence Gate (Hard Constraint with LLM Verifier)"""
     mode = state.get("dialogue_mode")
@@ -702,6 +738,19 @@ async def evidence_gate_node(state: TwinState):
                         reason = f"Verifier failed: {v_res.get('reason')}"
             except Exception as e:
                 print(f"Verifier error: {e}")
+                # Tag error in Langfuse
+                try:
+                    langfuse_context.update_current_observation(
+                        level="WARNING",
+                        status_message=f"Verifier failed: {str(e)[:255]}",
+                        metadata={
+                            "error": True,
+                            "error_type": type(e).__name__,
+                            "error_node": "evidence_gate_verifier",
+                        }
+                    )
+                except Exception:
+                    pass
                 # Fallback to simple context check
                 if len(context) < 1:
                     if interaction_context == "owner_training" and (mode == "TEACHING" or explicit_teaching):
@@ -936,6 +985,19 @@ OUTPUT FORMAT (STRICT JSON):
         }
     except Exception as e:
         print(f"Planner error: {e}")
+        # Tag error in Langfuse
+        try:
+            langfuse_context.update_current_observation(
+                level="ERROR",
+                status_message=f"Planner failed: {str(e)[:255]}",
+                metadata={
+                    "error": True,
+                    "error_type": type(e).__name__,
+                    "error_node": "planner_node",
+                }
+            )
+        except Exception:
+            pass
         return {
             "planning_output": {
                 "answer_points": ["I encountered an error planning my response."],
@@ -1002,6 +1064,19 @@ async def realizer_node(state: TwinState):
         }
     except Exception as e:
         print(f"Realizer error: {e}")
+        # Tag error in Langfuse
+        try:
+            langfuse_context.update_current_observation(
+                level="ERROR",
+                status_message=f"Realizer failed: {str(e)[:255]}",
+                metadata={
+                    "error": True,
+                    "error_type": type(e).__name__,
+                    "error_node": "realizer_node",
+                }
+            )
+        except Exception:
+            pass
         answer_points = plan.get("answer_points", []) if isinstance(plan, dict) else []
         follow_up = (plan.get("follow_up_question") if isinstance(plan, dict) else None) or ""
         fallback_base = " ".join(
@@ -1047,6 +1122,7 @@ def create_twin_agent(
         resolve_default_group=resolve_default_group,
     )
 
+    @observe(name="retrieve_hybrid_node")
     async def retrieve_hybrid_node(state: TwinState):
         """Phase 2: Executing planned retrieval (Audit 1: Parallel & Robust)"""
         sub_queries = state.get("sub_queries", [])
@@ -1060,6 +1136,18 @@ def create_twin_agent(
                 return json.loads(res_str)
             except Exception as e:
                 print(f"Retrieval error: {e}")
+                # Tag error in Langfuse
+                try:
+                    langfuse_context.update_current_observation(
+                        level="WARNING",
+                        metadata={
+                            "retrieval_error": True,
+                            "error_type": type(e).__name__,
+                            "query": query[:200] if query else None,
+                        }
+                    )
+                except Exception:
+                    pass
                 return []
 
         tasks = [safe_retrieve(q) for q in sub_queries]

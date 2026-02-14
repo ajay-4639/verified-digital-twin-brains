@@ -9,13 +9,30 @@ import { SimulatorView } from '@/components/training';
 
 export default function SimulatorPublicPage() {
     const { activeTwin } = useTwin();
+    const [twinIdParam, setTwinIdParam] = useState<string | null>(null);
+    const [shareTokenParam, setShareTokenParam] = useState<string | null>(null);
+    const effectiveTwinId = twinIdParam || activeTwin?.id;
     const [shareUrl, setShareUrl] = useState<string>('');
     const [shareToken, setShareToken] = useState<string | null>(null);
     const [loadingShare, setLoadingShare] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        const params = new URLSearchParams(window.location.search);
+        setTwinIdParam(params.get('twin_id'));
+        setShareTokenParam(params.get('share_token'));
+    }, []);
+
     const fetchShareLink = useCallback(async () => {
-        if (!activeTwin?.id) {
+        if (shareTokenParam) {
+            setShareToken(shareTokenParam);
+            setShareUrl('');
+            setError(null);
+            return;
+        }
+
+        if (!effectiveTwinId) {
             setShareUrl('');
             return;
         }
@@ -31,7 +48,7 @@ export default function SimulatorPublicPage() {
             }
 
             const backendUrl = resolveApiBaseUrl();
-            const res = await fetch(`${backendUrl}/twins/${activeTwin.id}/share-link`, {
+            const res = await fetch(`${backendUrl}/twins/${effectiveTwinId}/share-link`, {
                 headers: { Authorization: `Bearer ${session.access_token}` },
             });
 
@@ -58,7 +75,7 @@ export default function SimulatorPublicPage() {
         } finally {
             setLoadingShare(false);
         }
-    }, [activeTwin?.id]);
+    }, [effectiveTwinId, shareTokenParam]);
 
     useEffect(() => {
         fetchShareLink();
@@ -109,7 +126,7 @@ export default function SimulatorPublicPage() {
                     </div>
                 </div>
 
-                <SimulatorView twinId={activeTwin?.id} mode="public" publicShareToken={shareToken} />
+                <SimulatorView twinId={effectiveTwinId} mode="public" publicShareToken={shareToken} />
             </div>
         </div>
     );

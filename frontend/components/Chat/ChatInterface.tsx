@@ -325,16 +325,23 @@ export default function ChatInterface({
     try {
       const usePublicShareEndpoint = mode === 'public' && !!publicShareToken;
       abortRef.current = new AbortController();
+      
+      // Generate trace ID for Langfuse observability (links frontend action to backend trace)
+      const traceId = crypto.randomUUID();
 
       if (usePublicShareEndpoint) {
         const response = await fetch(`${apiBaseUrl}/public/chat/${twinId}/${publicShareToken}`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Content-Type': 'application/json',
+            'X-Langfuse-Trace-Id': traceId,
+          },
           body: JSON.stringify({
             message: text,
             conversation_history: messages
               .filter((msg) => msg.role === 'user' || msg.role === 'assistant')
-              .map((msg) => ({ role: msg.role, content: msg.content }))
+              .map((msg) => ({ role: msg.role, content: msg.content })),
+            trace_id: traceId,
           }),
           signal: abortRef.current.signal
         });
@@ -383,6 +390,7 @@ export default function ChatInterface({
 
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
+        'X-Langfuse-Trace-Id': traceId,
       };
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
@@ -396,6 +404,7 @@ export default function ChatInterface({
           conversation_id: conversationId || null,
           mode,
           training_session_id: mode === 'training' ? (trainingSessionId || undefined) : undefined,
+          trace_id: traceId,
         }),
         signal: abortRef.current.signal
       });

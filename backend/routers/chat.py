@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from fastapi.responses import StreamingResponse
 from typing import List, Optional
 from modules.schemas import (
@@ -38,6 +38,10 @@ import uuid
 # Langfuse v3 tracing
 try:
     from langfuse import observe, get_client, propagate_attributes
+    try:
+        from langfuse.decorators import langfuse_context
+    except ImportError:
+        from langfuse import langfuse_context
     _langfuse_available = True
     _langfuse_client = get_client()
 except ImportError:
@@ -51,6 +55,11 @@ except ImportError:
     @contextmanager
     def propagate_attributes(**kwargs):
         yield
+    
+    class _MockLangfuseContext:
+        def update_current_trace(self, *args, **kwargs): pass
+        def update_current_observation(self, *args, **kwargs): pass
+    langfuse_context = _MockLangfuseContext()
 
 
 import logging
@@ -377,14 +386,82 @@ async def _apply_persona_audit(
                 "violated_clause_ids": audit.violated_clause_ids,
             }
         )
+        
+        # Log persona audit scores to Langfuse
+        try:
+            if _langfuse_available and _langfuse_client:
+                # Get the current trace ID
+                trace_id = None
+                try:
+                    from langfuse.decorators import langfuse_context
+                    # Try to get trace ID from context
+                    trace_id = getattr(langfuse_context, 'current_trace_id', None)
+                except Exception:
+                    pass
+                
+                if trace_id:
+                    # Log individual scores
+                    if audit.structure_policy_score is not None:
+                        _langfuse_client.score(
+                            trace_id=trace_id,
+                            name="persona_structure_policy",
+                            value=audit.structure_policy_score,
+                            data_type="NUMERIC"
+                        )
+                    if audit.voice_score is not None:
+                        _langfuse_client.score(
+                            trace_id=trace_id,
+                            name="persona_voice_fidelity",
+                            value=audit.voice_score,
+                            data_type="NUMERIC"
+                        )
+                    if audit.final_persona_score is not None:
+                        _langfuse_client.score(
+                            trace_id=trace_id,
+                            name="persona_overall",
+                            value=audit.final_persona_score,
+                            data_type="NUMERIC"
+                        )
+                    
+                    # Log rewrite flag
+                    if audit.rewrite_applied:
+                        _langfuse_client.score(
+                            trace_id=trace_id,
+                            name="persona_rewrite_applied",
+                            value=1,
+                            comment=f"Reasons: {', '.join(audit.rewrite_reason_categories)}",
+                            data_type="BOOLEAN"
+                        )
+                    
+                    _langfuse_client.flush()
+        except Exception as e:
+            logger.debug(f"Failed to log persona scores to Langfuse: {e}")
+        
         return audit.final_response, audit.intent_label, audit.module_ids
     except Exception as e:
         logger.warning(f"Persona audit failed, using draft response: {e}")
+        # Tag error in Langfuse for visibility
+        try:
+            langfuse_context.update_current_observation(
+                level="WARNING",
+                metadata={
+                    "persona_audit_error": True,
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                }
+            )
+        except Exception:
+            pass
         return draft_response, intent_label, module_ids
 
 @router.post("/chat/{twin_id}")
 @observe(name="chat_request")
-async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user)):
+async def chat(
+    twin_id: str, 
+    request: ChatRequest, 
+    user=Depends(get_current_user),
+    x_langfuse_trace_id: Optional[str] = Header(None, alias="X-Langfuse-Trace-Id")
+):
     # P0: Verify user has access to this twin
     verify_twin_ownership(twin_id, user)
     ensure_twin_active(twin_id)
@@ -393,6 +470,15 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
     query = request.query or request.message or ""
     if not query:
         raise HTTPException(status_code=422, detail="query is required")
+    
+    # Use trace_id from header or body (header takes precedence for frontend linking)
+    trace_id = x_langfuse_trace_id or request.trace_id
+    if trace_id:
+        try:
+            langfuse_context.update_current_trace(id=trace_id)
+        except Exception:
+            pass  # Trace ID setting is best-effort
+    
     conversation_id = request.conversation_id
     group_id = request.group_id
     requested_group_id = request.group_id
@@ -818,8 +904,30 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
             yield json.dumps({"type": "done"}) + "\n"
             
             print(f"[Chat] Stream ended for twin_id={twin_id}")
+            
+            # 6. Run evaluation (fire-and-forget, non-blocking)
+            try:
+                from modules.evaluation_pipeline import evaluate_response_async
+                # Build context text from citations
+                context_text = ""
+                if citations:
+                    context_text = "\n".join([str(c) for c in citations[:5]])
+                
+                # Get trace_id from current context if available
+                current_trace_id = trace_id  # Use the one from request
+                
+                evaluate_response_async(
+                    trace_id=current_trace_id or conversation_id or "unknown",
+                    query=query,
+                    response=full_response or fallback,
+                    context=context_text,
+                    citations=citations
+                )
+                print(f"[Chat] Evaluation triggered for conversation {conversation_id}")
+            except Exception as eval_err:
+                print(f"[Chat] Evaluation trigger failed (non-blocking): {eval_err}")
 
-            # 5. Log conversation
+            # 7. Log conversation
             if full_response or True: # Always log if we reached here
                 # Create conversation if needed
                 if not conversation_id:
@@ -850,7 +958,7 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                     interaction_context=resolved_context.context.value,
                 )
             
-            # 6. Trigger Scribe (Job Queue for reliability)
+            # 8. Trigger Scribe (Job Queue for reliability)
             try:
                 from modules._core.scribe_engine import enqueue_graph_extraction_job
                 job_id = None
@@ -876,6 +984,27 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
             traceback.print_exc()
             error_msg = f"Error: {str(e)}"
             print(f"[Chat] ERROR yielded in stream: {error_msg}")
+            # Tag trace as error in Langfuse for visibility
+            try:
+                langfuse_context.update_current_observation(
+                    level="ERROR",
+                    status_message=str(e)[:255],
+                    metadata={
+                        "error": True,
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                        "traceback": traceback.format_exc()[:1000],
+                    }
+                )
+                langfuse_context.update_current_trace(
+                    metadata={
+                        "error": True,
+                        "error_phase": "stream_generator",
+                        "error_type": type(e).__name__,
+                    }
+                )
+            except Exception as lf_err:
+                print(f"[Chat] Failed to tag Langfuse error: {lf_err}")
             yield json.dumps({"type": "error", "error": error_msg}) + "\n"
         
         finally:
@@ -922,6 +1051,7 @@ async def list_messages_endpoint(conversation_id: str, user=Depends(get_current_
 
 # Chat Widget Interface
 @router.post("/chat-widget/{twin_id}")
+@observe(name="chat_widget_request")
 async def chat_widget(twin_id: str, request: ChatWidgetRequest, req_raw: Request = None):
     """
     Public chat interface for widgets.
@@ -990,6 +1120,22 @@ async def chat_widget(twin_id: str, request: ChatWidgetRequest, req_raw: Request
     active_spec = get_active_persona_spec(twin_id=twin_id)
     if active_spec:
         context_trace["persona_spec_version"] = active_spec.get("version")
+    
+    # Langfuse trace propagation for widget endpoint
+    import os
+    release = os.getenv("LANGFUSE_RELEASE", "dev")
+    langfuse_prop_widget = propagate_attributes(
+        user_id=twin_id,
+        session_id=session_id,
+        metadata={
+            "endpoint": "chat-widget",
+            "group_id": str(group_id) if group_id else None,
+            "query_length": str(len(query)) if query else "0",
+            "api_key_id": key_info.get("id"),
+            "origin": origin,
+            "release": release,
+        }
+    )
     
     # Get conversation for session
     # (Simplified for now: 1 conversation per session)
@@ -1182,14 +1328,30 @@ async def chat_widget(twin_id: str, request: ChatWidgetRequest, req_raw: Request
         
         yield json.dumps({"type": "done", "escalated": confidence_score < 0.7}) + "\n"
 
-    return StreamingResponse(widget_stream_generator(), media_type="text/event-stream")
+    with langfuse_prop_widget:
+        return StreamingResponse(widget_stream_generator(), media_type="text/event-stream")
 
 @router.post("/public/chat/{twin_id}/{token}")
-async def public_chat_endpoint(twin_id: str, token: str, request: PublicChatRequest, req_raw: Request = None):
+@observe(name="public_chat_request")
+async def public_chat_endpoint(
+    twin_id: str, 
+    token: str, 
+    request: PublicChatRequest, 
+    req_raw: Request = None,
+    x_langfuse_trace_id: Optional[str] = Header(None, alias="X-Langfuse-Trace-Id")
+):
     """Handle public chat via share link"""
     from modules.share_links import validate_share_token, get_public_group_for_twin
     from modules.actions_engine import EventEmitter, TriggerMatcher, ActionDraftManager
     from modules.rate_limiting import check_rate_limit
+    
+    # Use trace_id from header or body (header takes precedence for frontend linking)
+    trace_id = x_langfuse_trace_id or request.trace_id
+    if trace_id:
+        try:
+            langfuse_context.update_current_trace(id=trace_id)
+        except Exception:
+            pass  # Trace ID setting is best-effort
     
     # Validate share token
     if not validate_share_token(token, twin_id):
@@ -1214,6 +1376,22 @@ async def public_chat_endpoint(twin_id: str, token: str, request: PublicChatRequ
     
     # Rate limit by IP address for public endpoints
     client_ip = req_raw.client.host if req_raw and req_raw.client else "unknown"
+    
+    # Langfuse trace propagation for public chat endpoint
+    release = os.getenv("LANGFUSE_RELEASE", "dev")
+    langfuse_prop_public = propagate_attributes(
+        user_id=twin_id,
+        session_id=None,  # Public chat doesn't have persistent sessions
+        metadata={
+            "endpoint": "public-chat",
+            "group_id": str(group_id) if 'group_id' in locals() and group_id else None,
+            "query_length": str(len(request.message)) if request.message else "0",
+            "share_token": token,
+            "client_ip": client_ip,
+            "release": release,
+        }
+    )
+    
     rate_key = f"public_chat:{twin_id}:{client_ip}"
     allowed, status = check_rate_limit(rate_key, "ip", "requests_per_minute", 10)
     if not allowed:
@@ -1321,93 +1499,115 @@ async def public_chat_endpoint(twin_id: str, token: str, request: PublicChatRequ
         if (m.get("topic_normalized") or m.get("topic"))
     ]
 
-    try:
-        final_response = ""
-        citations = []
-        confidence_score = 0.0
-        intent_label = None
-        module_ids = []
-        async for event in run_agent_stream(
-            twin_id,
-            request.message,
-            history,
-            group_id=group_id,
-            conversation_id=conversation_id,
-            owner_memory_context=owner_memory_context,
-            interaction_context=resolved_context.context.value,
-        ):
-            tools_payload, agent_payload = _extract_stream_payload(event)
-            if tools_payload:
-                next_citations = tools_payload.get("citations")
-                citations = _merge_citations(citations, next_citations)
-                next_confidence = tools_payload.get("confidence_score")
-                if isinstance(next_confidence, (int, float)):
-                    confidence_score = float(next_confidence)
-            if agent_payload:
-                messages = agent_payload.get("messages", [])
-                if not messages:
-                    continue
-                msg = messages[-1]
-                if isinstance(msg, AIMessage) and msg.content:
-                    if hasattr(msg, "additional_kwargs") and isinstance(msg.additional_kwargs, dict):
-                        intent_label = msg.additional_kwargs.get("intent_label", intent_label)
-                        module_ids = msg.additional_kwargs.get("module_ids", module_ids) or []
-                        if msg.additional_kwargs.get("persona_spec_version"):
-                            context_trace["persona_spec_version"] = msg.additional_kwargs["persona_spec_version"]
-                        if msg.additional_kwargs.get("persona_prompt_variant"):
-                            context_trace["persona_prompt_variant"] = msg.additional_kwargs["persona_prompt_variant"]
-                    final_response = msg.content
-        
-        # If actions were triggered, append acknowledgment
-        if triggered_actions:
-            acknowledgments = []
-            for action in triggered_actions:
-                if action == 'escalate' or action == 'notify_owner':
-                    acknowledgments.append("I've notified the owner about your request.")
-                elif action == 'draft_email':
-                    acknowledgments.append("I'm drafting an email for the owner to review.")
-                elif action == 'draft_calendar_event':
-                    acknowledgments.append("I'm preparing a calendar event for the owner to review.")
+    with langfuse_prop_public:
+        try:
+            final_response = ""
+            citations = []
+            confidence_score = 0.0
+            intent_label = None
+            module_ids = []
+            async for event in run_agent_stream(
+                twin_id,
+                request.message,
+                history,
+                group_id=group_id,
+                conversation_id=conversation_id,
+                owner_memory_context=owner_memory_context,
+                interaction_context=resolved_context.context.value,
+            ):
+                tools_payload, agent_payload = _extract_stream_payload(event)
+                if tools_payload:
+                    next_citations = tools_payload.get("citations")
+                    citations = _merge_citations(citations, next_citations)
+                    next_confidence = tools_payload.get("confidence_score")
+                    if isinstance(next_confidence, (int, float)):
+                        confidence_score = float(next_confidence)
+                if agent_payload:
+                    messages = agent_payload.get("messages", [])
+                    if not messages:
+                        continue
+                    msg = messages[-1]
+                    if isinstance(msg, AIMessage) and msg.content:
+                        if hasattr(msg, "additional_kwargs") and isinstance(msg.additional_kwargs, dict):
+                            intent_label = msg.additional_kwargs.get("intent_label", intent_label)
+                            module_ids = msg.additional_kwargs.get("module_ids", module_ids) or []
+                            if msg.additional_kwargs.get("persona_spec_version"):
+                                context_trace["persona_spec_version"] = msg.additional_kwargs["persona_spec_version"]
+                            if msg.additional_kwargs.get("persona_prompt_variant"):
+                                context_trace["persona_prompt_variant"] = msg.additional_kwargs["persona_prompt_variant"]
+                        final_response = msg.content
             
-            if acknowledgments:
-                final_response += "\n\n" + " ".join(acknowledgments)
+            # If actions were triggered, append acknowledgment
+            if triggered_actions:
+                acknowledgments = []
+                for action in triggered_actions:
+                    if action == 'escalate' or action == 'notify_owner':
+                        acknowledgments.append("I've notified the owner about your request.")
+                    elif action == 'draft_email':
+                        acknowledgments.append("I'm drafting an email for the owner to review.")
+                    elif action == 'draft_calendar_event':
+                        acknowledgments.append("I'm preparing a calendar event for the owner to review.")
+                
+                if acknowledgments:
+                    final_response += "\n\n" + " ".join(acknowledgments)
 
-        fallback_message = _uncertainty_message(resolved_context.context.value)
-        draft_for_audit = final_response if final_response else fallback_message
-        final_response, intent_label, module_ids = await _apply_persona_audit(
-            twin_id=twin_id,
-            user_query=request.message,
-            draft_response=draft_for_audit,
-            intent_label=intent_label,
-            module_ids=module_ids,
-            citations=citations,
-            context_trace=context_trace,
-            tenant_id=None,
-            conversation_id=conversation_id,
-            interaction_context=resolved_context.context.value,
-        )
-        
-        citations = _normalize_json(citations)
-        citation_details = _normalize_json(_resolve_citation_details(citations, twin_id))
-        owner_memory_refs = _normalize_json(owner_memory_refs)
-        owner_memory_topics = _normalize_json(owner_memory_topics)
+            fallback_message = _uncertainty_message(resolved_context.context.value)
+            draft_for_audit = final_response if final_response else fallback_message
+            final_response, intent_label, module_ids = await _apply_persona_audit(
+                twin_id=twin_id,
+                user_query=request.message,
+                draft_response=draft_for_audit,
+                intent_label=intent_label,
+                module_ids=module_ids,
+                citations=citations,
+                context_trace=context_trace,
+                tenant_id=None,
+                conversation_id=conversation_id,
+                interaction_context=resolved_context.context.value,
+            )
+            
+            citations = _normalize_json(citations)
+            citation_details = _normalize_json(_resolve_citation_details(citations, twin_id))
+            owner_memory_refs = _normalize_json(owner_memory_refs)
+            owner_memory_topics = _normalize_json(owner_memory_topics)
 
-        return {
-            "status": "answer",
-            "response": final_response,
-            "citations": citations,
-            "citation_details": citation_details,
-            "confidence_score": confidence_score,
-            "owner_memory_refs": owner_memory_refs,
-            "owner_memory_topics": owner_memory_topics,
-            "intent_label": intent_label,
-            "module_ids": module_ids,
-            "used_owner_memory": bool(owner_memory_refs),
-            "identity_gate_mode": gate.get("gate_mode"),
-            **context_trace,
-        }
-    except Exception as e:
-        print(f"Error in public chat: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail="Failed to process message")
+            return {
+                "status": "answer",
+                "response": final_response,
+                "citations": citations,
+                "citation_details": citation_details,
+                "confidence_score": confidence_score,
+                "owner_memory_refs": owner_memory_refs,
+                "owner_memory_topics": owner_memory_topics,
+                "intent_label": intent_label,
+                "module_ids": module_ids,
+                "used_owner_memory": bool(owner_memory_refs),
+                "identity_gate_mode": gate.get("gate_mode"),
+                **context_trace,
+            }
+        except Exception as e:
+            print(f"Error in public chat: {e}")
+            import traceback
+            traceback.print_exc()
+            # Tag trace as error in Langfuse for visibility
+            try:
+                langfuse_context.update_current_observation(
+                    level="ERROR",
+                    status_message=str(e)[:255],
+                    metadata={
+                        "error": True,
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                        "traceback": traceback.format_exc()[:1000],
+                    }
+                )
+                langfuse_context.update_current_trace(
+                    metadata={
+                        "error": True,
+                        "error_phase": "public_chat",
+                        "error_type": type(e).__name__,
+                    }
+                )
+            except Exception as lf_err:
+                print(f"[PublicChat] Failed to tag Langfuse error: {lf_err}")
+            raise HTTPException(status_code=500, detail="Failed to process message")

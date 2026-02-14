@@ -242,6 +242,78 @@ async def run_online_eval(
     }
 
 
+async def judge_response_completeness(
+    query: str,
+    answer: str,
+    model: str = "gpt-4o-mini"
+) -> Dict[str, Any]:
+    """
+    Judge if the answer fully addresses the query.
+    
+    Args:
+        query: The user's question
+        answer: The generated answer
+        model: Model to use for judging
+    
+    Returns:
+        Dict with score (0.0-1.0) and reasoning
+    """
+    from modules.clients import get_openai_client
+    
+    prompt = f"""You are an expert judge evaluating response completeness.
+
+USER QUERY:
+{query}
+
+AI'S ANSWER:
+{answer}
+
+TASK: Evaluate how completely the answer addresses the query.
+
+Scoring:
+- 1.0: Fully addresses all aspects of the query
+- 0.7-0.9: Addresses most aspects but may miss minor details
+- 0.4-0.6: Partially addresses the query, significant gaps
+- 0.0-0.3: Barely addresses or completely misses the query
+
+Respond with a JSON object:
+{{
+  "score": <float 0.0-1.0>,
+  "reasoning": "<brief explanation of what was addressed or missed>"
+}}
+
+Only respond with the JSON, no other text."""
+
+    try:
+        client = get_openai_client()
+        loop = asyncio.get_event_loop()
+        
+        def _call():
+            return client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=200,
+                response_format={"type": "json_object"}
+            )
+        
+        response = await loop.run_in_executor(None, _call)
+        result = response.choices[0].message.content
+        
+        parsed = json.loads(result)
+        return {
+            "score": float(parsed.get("score", 0.5)),
+            "reasoning": parsed.get("reasoning", "")
+        }
+        
+    except Exception as e:
+        logger.error(f"Completeness judge failed: {e}")
+        return {
+            "score": None,
+            "reasoning": f"Judge error: {e}"
+        }
+
+
 def _safe_json_loads(raw: str, fallback: Dict[str, Any]) -> Dict[str, Any]:
     try:
         return json.loads(raw or "{}")

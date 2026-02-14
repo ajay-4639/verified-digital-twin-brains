@@ -1,21 +1,66 @@
 services:
   - type: web
     name: verified-digital-twin-brain-api
-    env: python
-    buildCommand: pip install -r backend/requirements.txt
-    startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
+    runtime: python
+    plan: standard
+    region: oregon
+    
+    # Build configuration
+    buildCommand: |
+      echo "=== Starting Build ==="
+      pip install --upgrade pip
+      pip install --no-cache-dir -r backend/requirements.txt
+      echo "=== Build Complete ==="
+    
+    # Start command with single worker to reduce memory usage
+    startCommand: |
+      echo "=== Starting Application ==="
+      cd backend
+      uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --timeout-keep-alive 120 --log-level info
+    
+    # Health check configuration
     healthCheckPath: /health
-    healthCheckTimeout: 300
-    buildFilter:
-      paths:
-        - backend/**
-      ignoredPaths:
-        - frontend/**
-        - "**/*.md"
+    healthCheckTimeout: 120
+    healthCheckInterval: 15
+    
+    # Wait longer before starting health checks (grace period)
+    # This gives the app time to fully start up
+    
+    autoDeploy: true
+    
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      - key: PYTHONUNBUFFERED
+        value: "true"
+      - key: PIP_NO_CACHE_DIR
+        value: "true"
+      # Required secrets (set in Render dashboard)
       - key: LANGFUSE_PUBLIC_KEY
         sync: false
       - key: LANGFUSE_SECRET_KEY
         sync: false
+      - key: LANGFUSE_HOST
+        value: https://cloud.langfuse.com
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: CEREBRAS_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+    
+    # Ephemeral disk for temp files
+    disk:
+      name: tmp
+      mountPath: /tmp
+      sizeGB: 1

@@ -93,6 +93,7 @@ export function useJobPoller({
   const errorCountRef = useRef(0);
   const startTimeRef = useRef<number>(0);
   const isVisibleRef = useRef(true);
+  const endpointKindRef = useRef<'auto' | 'ingestion' | 'training' | 'jobs'>('auto');
   
   const log = useCallback((...args: any[]) => {
     if (debug) console.log('[useJobPoller]', ...args);
@@ -122,6 +123,18 @@ export function useJobPoller({
     setIsPolling(false);
     log('Cleanup complete');
   }, [log]);
+
+  const jobDetailPath = useCallback((jobId: string, kind: 'ingestion' | 'training' | 'jobs'): string => {
+    if (kind === 'ingestion') return API_ENDPOINTS.INGESTION_JOB_DETAIL(jobId);
+    if (kind === 'training') return `/training-jobs/${jobId}`;
+    return API_ENDPOINTS.JOB_DETAIL(jobId);
+  }, []);
+
+  const jobRetryPath = useCallback((jobId: string, kind: 'ingestion' | 'training' | 'jobs'): string => {
+    if (kind === 'ingestion') return API_ENDPOINTS.INGESTION_JOBS_RETRY(jobId);
+    if (kind === 'training') return `/training-jobs/${jobId}/retry`;
+    return API_ENDPOINTS.JOB_RETRY(jobId);
+  }, []);
 
   // Main polling function
   const poll = useCallback(async () => {
@@ -155,16 +168,62 @@ export function useJobPoller({
 
     try {
       log('Polling job:', currentJobId);
-      const response = await fetch(
-        `${API_BASE_URL}${API_ENDPOINTS.JOB_DETAIL(currentJobId)}`,
-        {
-          headers: { Authorization: `Bearer ${token}` },
-          signal: abortControllerRef.current.signal,
+      const requestOptions: RequestInit = {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: abortControllerRef.current.signal,
+      };
+
+      let response: Response | null = null;
+      let resolvedKind: 'ingestion' | 'training' | 'jobs' | null = null;
+
+      if (endpointKindRef.current === 'auto') {
+        const candidates: Array<'ingestion' | 'training' | 'jobs'> = ['ingestion', 'training', 'jobs'];
+        for (const kind of candidates) {
+          const candidateResponse = await fetch(
+            `${API_BASE_URL}${jobDetailPath(currentJobId, kind)}`,
+            requestOptions
+          );
+          if (candidateResponse.status === 404) continue;
+          response = candidateResponse;
+          resolvedKind = kind;
+          break;
         }
-      );
+      } else {
+        const kind = endpointKindRef.current;
+        const candidateResponse = await fetch(
+          `${API_BASE_URL}${jobDetailPath(currentJobId, kind)}`,
+          requestOptions
+        );
+        // If the remembered endpoint is no longer valid, re-run auto detection.
+        if (candidateResponse.status === 404) {
+          endpointKindRef.current = 'auto';
+          const candidates: Array<'ingestion' | 'training' | 'jobs'> = ['ingestion', 'training', 'jobs'];
+          for (const candidate of candidates) {
+            const retryResponse = await fetch(
+              `${API_BASE_URL}${jobDetailPath(currentJobId, candidate)}`,
+              requestOptions
+            );
+            if (retryResponse.status === 404) continue;
+            response = retryResponse;
+            resolvedKind = candidate;
+            break;
+          }
+        } else {
+          response = candidateResponse;
+          resolvedKind = kind;
+        }
+      }
+
+      if (!response) {
+        throw new Error('HTTP 404: Job not found in ingestion-jobs, training-jobs, or jobs');
+      }
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      if (resolvedKind) {
+        endpointKindRef.current = resolvedKind;
       }
 
       const data: Job = await response.json();
@@ -214,6 +273,7 @@ export function useJobPoller({
   const startPolling = useCallback((newJobId: string) => {
     log('Starting polling for job:', newJobId);
     jobIdRef.current = newJobId;
+    endpointKindRef.current = 'auto';
     startTimeRef.current = Date.now();
     errorCountRef.current = 0;
     setError(null);
@@ -235,15 +295,33 @@ export function useJobPoller({
 
     try {
       log('Retrying job:', currentJobId);
-      const response = await fetch(
-        `${API_BASE_URL}${API_ENDPOINTS.JOB_RETRY(currentJobId)}`,
-        {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      );
+      const requestOptions: RequestInit = {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      };
 
-      if (response.ok) {
+      let response: Response | null = null;
+
+      if (endpointKindRef.current === 'auto') {
+        const candidates: Array<'ingestion' | 'training' | 'jobs'> = ['ingestion', 'training', 'jobs'];
+        for (const kind of candidates) {
+          const candidateResponse = await fetch(
+            `${API_BASE_URL}${jobRetryPath(currentJobId, kind)}`,
+            requestOptions
+          );
+          if (candidateResponse.status === 404) continue;
+          response = candidateResponse;
+          endpointKindRef.current = kind;
+          break;
+        }
+      } else {
+        response = await fetch(
+          `${API_BASE_URL}${jobRetryPath(currentJobId, endpointKindRef.current)}`,
+          requestOptions
+        );
+      }
+
+      if (response?.ok) {
         // Restart polling
         startPolling(currentJobId);
         return true;

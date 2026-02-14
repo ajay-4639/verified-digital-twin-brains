@@ -129,6 +129,11 @@ def _semantic_match_query(
     best_match = None
     best_score = current_best_score
     best_overlap = 0.0
+    query_tokens = _normalize_tokens(query)
+    if not query_tokens:
+        # Avoid semantic-only matches for ultra-generic prompts
+        # (e.g., "who are you?") that have no lexical grounding.
+        return (None, best_score)
 
     try:
         # Generate embedding for the query
@@ -147,11 +152,10 @@ def _semantic_match_query(
                 # Calculate cosine similarity
                 similarity = cosine_similarity(query_embedding, stored_embedding)
                 
-                # Guardrail: semantic-only matches must keep some lexical grounding to avoid
+                # Guardrail: semantic matches must keep lexical grounding to avoid
                 # unrelated interview snippets winning on broad embedding similarity.
                 overlap = _token_overlap_score(query, qna.get("question", ""))
-                grounded = overlap >= 0.12 or similarity >= 0.90
-                if not grounded:
+                if overlap < 0.12:
                     continue
 
                 # Update best match if similarity exceeds threshold and is better than current best

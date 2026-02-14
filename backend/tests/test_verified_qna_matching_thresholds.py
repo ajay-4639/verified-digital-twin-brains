@@ -38,6 +38,30 @@ async def test_semantic_match_requires_lexical_grounding(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_semantic_match_rejects_high_similarity_without_overlap(monkeypatch):
+    entries = [_mock_qna_entry("q1", "How's your day going so far?", "I'm good.")]
+
+    monkeypatch.setattr(verified_qna, "_fetch_verified_qna_entries", lambda twin_id, group_id=None: entries)
+    monkeypatch.setattr(verified_qna, "get_embedding", lambda _text: [0.1, 0.2, 0.3])
+    monkeypatch.setattr(verified_qna, "cosine_similarity", lambda _a, _b: 0.99)
+    monkeypatch.setattr(
+        verified_qna,
+        "_format_match_result",
+        lambda best_match, best_score: {"id": best_match["id"], "similarity_score": best_score},
+    )
+
+    result = await verified_qna.match_verified_qna(
+        query="who are you?",
+        twin_id="twin-1",
+        use_exact=False,
+        use_semantic=True,
+        semantic_threshold=0.75,
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
 async def test_semantic_match_with_overlap_is_allowed(monkeypatch):
     entries = [_mock_qna_entry("q2", "Do you know antler?", "Yes, I know Antler.")]
 

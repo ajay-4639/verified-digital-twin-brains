@@ -40,7 +40,7 @@ TONE_KEYWORDS = {"tone", "voice", "style", "sound", "wording", "phrasing"}
 LENS_KEYWORDS = {"lens", "framework", "principle", "values", "philosophy"}
 BELIEF_KEYWORDS = {"belief", "conviction"}
 GOAL_KEYWORDS = {"goal", "goals", "objective", "objectives", "aim", "aims", "target"}
-INTENT_KEYWORDS = {"intent", "intention", "trying to", "want to", "plan to", "planning to"}
+INTENT_KEYWORDS = {"intent", "intention"}
 CONSTRAINT_KEYWORDS = {"constraint", "constraints", "limitation", "limitations", "restricted", "must", "can't", "cannot"}
 BOUNDARY_KEYWORDS = {"boundary", "boundaries", "won't", "will not", "never"}
 
@@ -137,7 +137,8 @@ async def run_identity_gate(
     twin_id: str,
     tenant_id: Optional[str],
     group_id: Optional[str],
-    mode: str = "owner"
+    mode: str = "owner",
+    allow_clarify: bool = True,
 ) -> Dict[str, Any]:
     """
     Returns a decision dict:
@@ -194,6 +195,21 @@ async def run_identity_gate(
                 "question": clarification["question"],
                 "options": clarification["options"],
                 "memory_write_proposal": clarification["memory_write_proposal"],
+                "owner_memory": [],
+                "owner_memory_refs": [],
+                "owner_memory_context": "",
+            }
+
+        # Owner chat (non-training) should stay conversational. We only open
+        # clarification loops when explicitly enabled by caller.
+        if not allow_clarify:
+            return {
+                "decision": "ANSWER",
+                "requires_owner": True,
+                "memory_type": memory_type,
+                "topic": topic,
+                "reason": "clarification_disabled",
+                "gate_mode": mode_normalized,
                 "owner_memory": [],
                 "owner_memory_refs": [],
                 "owner_memory_context": "",

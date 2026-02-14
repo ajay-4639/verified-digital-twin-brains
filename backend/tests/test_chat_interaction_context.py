@@ -453,3 +453,65 @@ def test_owner_chat_accepts_node_update_stream_shape():
             assert content["content"] == "node-shape answer"
     finally:
         app.dependency_overrides = {}
+
+
+def test_owner_chat_smalltalk_does_not_force_uncertainty_without_citations():
+    app.dependency_overrides[get_current_user] = _owner_user
+    gate_mock = AsyncMock(
+        return_value={
+            "decision": "ANSWER",
+            "requires_owner": False,
+            "reason": "test",
+            "owner_memory": [],
+            "owner_memory_refs": [],
+            "owner_memory_context": "",
+        }
+    )
+
+    async def _fake_smalltalk_stream(*_args, **_kwargs):
+        msg = AIMessage(content="Hey! Great to chat with you.")
+        msg.additional_kwargs = {
+            "intent_label": "meta_or_system",
+            "module_ids": ["procedural.style.smalltalk"],
+            "persona_spec_version": "9.9.9",
+        }
+        yield {"agent": {"messages": [msg]}}
+
+    try:
+        with patch("routers.chat.verify_twin_ownership"), patch(
+            "routers.chat.ensure_twin_active"
+        ), patch(
+            "routers.chat.get_user_group", new=AsyncMock(return_value=None)
+        ), patch(
+            "routers.chat.get_default_group", new=AsyncMock(return_value={"id": "group-1"})
+        ), patch(
+            "routers.chat._fetch_conversation_record",
+            return_value={
+                "id": "conv-1",
+                "twin_id": "twin-1",
+                "group_id": "group-1",
+                "interaction_context": "owner_chat",
+                "training_session_id": None,
+            },
+        ), patch(
+            "routers.chat.get_messages", return_value=[]
+        ), patch(
+            "routers.chat.log_interaction"
+        ), patch(
+            "routers.chat.run_identity_gate", gate_mock
+        ), patch(
+            "routers.chat.run_agent_stream", _fake_smalltalk_stream
+        ), patch(
+            "modules.graph_context.get_graph_stats", return_value={"has_graph": False, "node_count": 0}
+        ):
+            resp = client.post(
+                "/chat/twin-1",
+                json={"query": "hi", "conversation_id": "conv-1"},
+            )
+            assert resp.status_code == 200
+            blocks = _parse_sse_blocks(resp.text)
+            content = next((b for b in blocks if b.get("type") == "content"), None)
+            assert content is not None
+            assert content["content"] == "Hey! Great to chat with you."
+    finally:
+        app.dependency_overrides = {}

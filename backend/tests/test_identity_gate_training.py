@@ -10,6 +10,12 @@ def test_classify_query_goals_requires_owner():
     assert result["memory_type"] == "belief"
 
 
+def test_classify_query_generic_want_to_does_not_require_owner():
+    result = classify_query("I want to ask you about antler")
+    assert result["requires_owner"] is False
+    assert result["memory_type"] is None
+
+
 @pytest.mark.asyncio
 async def test_identity_gate_falls_back_to_intent_profile(monkeypatch):
     monkeypatch.setattr(identity_gate, "find_owner_memory_candidates", lambda *args, **kwargs: [])
@@ -62,3 +68,22 @@ async def test_identity_gate_public_mode_requests_owner_clarification(monkeypatc
     assert result["decision"] == "CLARIFY"
     assert result["reason"] == "missing_or_conflicting_public"
     assert result["gate_mode"] == "public"
+
+
+@pytest.mark.asyncio
+async def test_identity_gate_owner_chat_can_disable_clarify(monkeypatch):
+    monkeypatch.setattr(identity_gate, "find_owner_memory_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(identity_gate, "_load_intent_profile", lambda twin_id: {})
+
+    result = await identity_gate.run_identity_gate(
+        query="What is your stance on AI safety?",
+        history=[],
+        twin_id="twin-test",
+        tenant_id=None,
+        group_id=None,
+        mode="owner",
+        allow_clarify=False,
+    )
+
+    assert result["decision"] == "ANSWER"
+    assert result["reason"] == "clarification_disabled"

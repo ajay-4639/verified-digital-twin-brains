@@ -16,6 +16,7 @@ from modules.identity_gate import run_identity_gate
 from modules.owner_memory_store import create_clarification_thread
 from modules.memory_events import create_memory_event
 from modules.interaction_context import (
+    InteractionContext,
     ResolvedInteractionContext,
     resolve_owner_chat_context,
     resolve_widget_context,
@@ -56,6 +57,46 @@ router = APIRouter(tags=["chat"])
 
 def _uncertainty_message(interaction_context: Optional[str]) -> str:
     return f"{UNCERTAINTY_RESPONSE}{owner_guidance_suffix(interaction_context)}"
+
+
+def _query_requires_strict_grounding(query: str) -> bool:
+    """
+    Decide whether missing citations should force uncertainty.
+    Keep this strict for owner-specific/source-grounded requests, but allow
+    normal conversation turns (greetings/meta/coaching) to remain fluent.
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return False
+
+    explicit_source_requests = (
+        "based on my sources",
+        "from my sources",
+        "from my documents",
+        "cite",
+        "citation",
+        "with sources",
+        "according to my",
+    )
+    if any(marker in q for marker in explicit_source_requests):
+        return True
+
+    owner_specific_patterns = [
+        r"\bwhat (do|did) i think\b",
+        r"\bwhat('?s| is) my (stance|view|opinion|belief|thesis|principle)\b",
+        r"\bmy (stance|view|opinion|belief|thesis|principle)\b",
+        r"\bhow do i (approach|decide|evaluate)\b",
+    ]
+    if any(re.search(pattern, q) for pattern in owner_specific_patterns):
+        return True
+
+    # Reuse the identity gate classifier as a last-mile signal.
+    try:
+        from modules.identity_gate import classify_query
+
+        return bool(classify_query(query).get("requires_owner"))
+    except Exception:
+        return False
 
 
 def _is_uuid(value: str) -> bool:
@@ -464,7 +505,8 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                 twin_id=twin_id,
                 tenant_id=user.get("tenant_id") if user else None,
                 group_id=group_id,
-                mode=mode
+                mode=mode,
+                allow_clarify=(resolved_context.context == InteractionContext.OWNER_TRAINING),
             )
 
             # If clarification required, emit single clarify event and stop
@@ -680,6 +722,7 @@ async def chat(twin_id: str, request: ChatRequest, user=Depends(get_current_user
                 and full_response.strip() != fallback_message
                 and not citations
                 and not owner_memory_refs
+                and _query_requires_strict_grounding(query)
             ):
                 print("[Chat] Safety override: no evidence available; forcing uncertainty response")
                 full_response = fallback_message

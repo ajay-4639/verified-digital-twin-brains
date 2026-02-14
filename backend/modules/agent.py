@@ -7,7 +7,13 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
-from langfuse.decorators import observe
+try:
+    from langfuse import observe
+except ImportError:
+    def observe(*args, **kwargs):
+        def decorator(func): return func
+        return decorator
+
 from modules.tools import get_retrieval_tool
 from modules.observability import supabase
 from modules.persona_compiler import (

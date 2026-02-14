@@ -23,7 +23,11 @@ from modules.inference_cerebras import CerebrasClient
 logger = logging.getLogger(__name__)
 
 try:
-    from langfuse.decorators import observe, langfuse_context
+    from langfuse import observe
+    try:
+        from langfuse.decorators import langfuse_context
+    except ImportError:
+        from langfuse import langfuse_context
 except ImportError:
     class _LangfuseContextNoop:
         def update_current_observation(self, *args, **kwargs):

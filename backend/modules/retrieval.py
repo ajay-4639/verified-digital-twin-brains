@@ -127,20 +127,26 @@ def parse_namespace(namespace: str) -> tuple[Optional[str], str]:
             return parts[0], parts[1]
     return None, namespace
 
-# FlashRank for local reranking
-try:
-    from flashrank import Ranker, RerankRequest
-    _flashrank_available = True
-    # Cache the ranker instance
-    _ranker_instance = None
-except ImportError:
+# FlashRank reranking is opt-in to avoid startup/runtime regressions in production.
+_flashrank_enabled = os.getenv("ENABLE_FLASHRANK", "false").lower() == "true"
+if _flashrank_enabled:
+    try:
+        from flashrank import Ranker, RerankRequest
+        _flashrank_available = True
+        _ranker_instance = None
+    except ImportError:
+        _flashrank_available = False
+        _ranker_instance = None
+else:
+    Ranker = None  # type: ignore[assignment]
+    RerankRequest = None  # type: ignore[assignment]
     _flashrank_available = False
     _ranker_instance = None
 
 def get_ranker():
     """Lazy load FlashRank to avoid startup overhead."""
     global _ranker_instance
-    if _flashrank_available and _ranker_instance is None:
+    if _flashrank_enabled and _flashrank_available and _ranker_instance is None:
         try:
             # Use a lightweight model
             _ranker_instance = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir="./.model_cache")
@@ -1167,6 +1173,7 @@ async def get_retrieval_health_status(twin_id: Optional[str] = None) -> Dict[str
     dual_read = os.getenv("DELPHI_DUAL_READ", "true").lower() == "true"
     status["configuration"] = {
         "delphi_dual_read": dual_read,
+        "flashrank_enabled": _flashrank_enabled,
         "flashrank_available": _flashrank_available,
         "query_prep_timeout_s": RETRIEVAL_QUERY_PREP_TIMEOUT,
         "embedding_timeout_s": RETRIEVAL_EMBEDDING_TIMEOUT,

@@ -6,25 +6,7 @@ from typing import Annotated, TypedDict, List, Dict, Any, Union, Optional
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
-try:
-    from langfuse.decorators import observe, langfuse_context
-    _langfuse_available = True
-except ImportError:
-    _langfuse_available = False
-
-    def observe(*args, **kwargs):
-        def decorator(func):
-            return func
-        return decorator
-
-    class _MockLangfuseContext:
-        def update_current_trace(self, *args, **kwargs):
-            pass
-
-        def update_current_observation(self, *args, **kwargs):
-            pass
-
-    langfuse_context = _MockLangfuseContext()
+from modules.langfuse_sdk import langfuse_context, observe
 
 from modules.observability import supabase
 from modules.persona_compiler import (

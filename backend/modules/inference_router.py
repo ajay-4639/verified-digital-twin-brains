@@ -19,22 +19,9 @@ import httpx
 
 from modules.clients import get_async_openai_client
 from modules.inference_cerebras import CerebrasClient
+from modules.langfuse_sdk import langfuse_context, observe
 
 logger = logging.getLogger(__name__)
-
-try:
-    from langfuse.decorators import observe, langfuse_context
-except ImportError:
-    class _LangfuseContextNoop:
-        def update_current_observation(self, *args, **kwargs):
-            return None
-
-    langfuse_context = _LangfuseContextNoop()
-
-    def observe(*args, **kwargs):
-        def decorator(func):
-            return func
-        return decorator
 
 # Backward-compatible control flag.
 DEFAULT_PROVIDER = os.getenv("INFERENCE_PROVIDER", "openai").lower()

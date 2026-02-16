@@ -16,41 +16,23 @@ import logging
 import re
 from typing import Optional, Any, Callable, Union
 from functools import wraps
+from modules.langfuse_sdk import (
+    flush_client,
+    get_client as get_langfuse_client,
+    has_credentials as langfuse_has_credentials,
+    is_installed as langfuse_is_installed,
+    langfuse_context,
+    observe,
+)
 
 logger = logging.getLogger(__name__)
 
-# Check if langfuse is available
-_langfuse_available = False
-_observe = None
-_get_client = None
-
-try:
-    from langfuse.decorators import observe, langfuse_context
-    _langfuse_available = True
-    _observe = observe
-    try:
-        from langfuse import get_client as _get_client
-    except Exception:
-        _get_client = None
-    
-    logger.info("Langfuse SDK loaded successfully")
-except ImportError:
-    _langfuse_available = False
+# Check if langfuse is available.
+_langfuse_available = langfuse_is_installed()
+if not _langfuse_available:
     logger.warning("Langfuse SDK not installed - tracing disabled")
-    
-    class MockContext:
-        def update_current_trace(self, *args, **kwargs): pass
-        def update_current_observation(self, *args, **kwargs): pass
-        def update(self, *args, **kwargs): pass
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
-    
-    langfuse_context = MockContext()
-    
-    def observe(*args, **kwargs):
-        def decorator(func):
-            return func
-        return decorator
+else:
+    logger.info("Langfuse SDK loaded successfully")
 
 
 def is_langfuse_available() -> bool:
@@ -66,10 +48,7 @@ def is_langfuse_available() -> bool:
             return False
 
     # Check if keys are configured
-    secret_key = os.getenv("LANGFUSE_SECRET_KEY")
-    public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
-    
-    return bool(secret_key and public_key)
+    return bool(langfuse_has_credentials())
 
 
 def redact_pii(text: Any) -> Any:
@@ -106,8 +85,8 @@ def trace_span(name: str, metadata: dict = None):
             # No tracing, return original function
             return func
         
-        # Use the @observe decorator from langfuse v3
-        observed_func = _observe(name=name)(func)
+        # Use the compatibility observe decorator.
+        observed_func = observe(name=name)(func)
         
         @wraps(func)
         async def async_wrapper(*args, **kwargs):
@@ -221,10 +200,11 @@ def flush():
     if not is_langfuse_available():
         return
     
+    client = get_langfuse_client()
+    if not client:
+        return
     try:
-        client = _get_client()
-        if client and hasattr(client, 'flush'):
-            client.flush()
+        flush_client(client)
     except Exception as e:
         logger.error(f"Failed to flush Langfuse: {e}")
 
@@ -250,8 +230,4 @@ def get_langfuse():
     """Legacy function - returns client if available."""
     if not is_langfuse_available():
         return None
-    try:
-        from langfuse import Langfuse
-        return Langfuse()
-    except Exception:
-        return None
+    return get_langfuse_client()

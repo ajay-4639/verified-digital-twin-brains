@@ -8,6 +8,7 @@ import os
 import logging
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
+from modules.langfuse_sdk import langfuse_context
 
 logger = logging.getLogger(__name__)
 
@@ -279,8 +280,6 @@ class FewShotExampleSelector:
     ):
         """Track which examples were used in a trace."""
         try:
-            from langfuse.decorators import langfuse_context
-            
             langfuse_context.update_current_observation(
                 metadata={
                     "few_shot_examples_used": len(examples),

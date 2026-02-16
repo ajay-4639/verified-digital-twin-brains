@@ -7,6 +7,7 @@ import re
 from typing import List, Dict, Any, Optional, Set
 from contextlib import contextmanager
 from modules.clients import get_openai_client, get_pinecone_index, get_cohere_client
+from modules.langfuse_sdk import langfuse_context, observe
 from modules.verified_qna import match_verified_qna
 from modules.owner_memory_store import find_owner_memory_candidates
 from modules.observability import supabase
@@ -355,17 +356,6 @@ def _rerank_with_flashrank(
         print(f"[Retrieval] FlashRank reranking failed: {e}. Falling back.")
         return None
 
-
-# Langfuse v3 tracing
-try:
-    from langfuse.decorators import observe, langfuse_context
-    _langfuse_available = True
-except ImportError:
-    _langfuse_available = False
-    def observe(*args, **kwargs):
-        def decorator(func):
-            return func
-        return decorator
 
 async def expand_query(query: str) -> List[str]:
     """

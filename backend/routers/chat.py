@@ -35,53 +35,18 @@ import json
 import asyncio
 import uuid
 import os
-from contextlib import contextmanager
+from modules.langfuse_sdk import (
+    flush_client,
+    get_client as get_langfuse_client,
+    is_enabled as is_langfuse_enabled,
+    langfuse_context,
+    log_score,
+    observe,
+    propagate_attributes,
+)
 
-# Langfuse v3 tracing
-try:
-    from langfuse.decorators import observe, langfuse_context
-    _langfuse_available = True
-
-    try:
-        from langfuse import get_client
-        _langfuse_client = get_client()
-    except Exception:
-        try:
-            from langfuse import Langfuse
-            _langfuse_client = Langfuse()
-        except Exception:
-            _langfuse_client = None
-
-    try:
-        from langfuse import propagate_attributes as _propagate_attributes
-        propagate_attributes = _propagate_attributes
-    except Exception:
-        @contextmanager
-        def propagate_attributes(**kwargs):
-            try:
-                langfuse_context.update_current_trace(
-                    user_id=kwargs.get("user_id"),
-                    session_id=kwargs.get("session_id"),
-                    metadata=kwargs.get("metadata") or {},
-                )
-            except Exception:
-                pass
-            yield
-except Exception:
-    _langfuse_available = False
-    _langfuse_client = None
-    def observe(*args, **kwargs):
-        def decorator(func):
-            return func
-        return decorator
-    @contextmanager
-    def propagate_attributes(**kwargs):
-        yield
-    
-    class _MockLangfuseContext:
-        def update_current_trace(self, *args, **kwargs): pass
-        def update_current_observation(self, *args, **kwargs): pass
-    langfuse_context = _MockLangfuseContext()
+_langfuse_available = is_langfuse_enabled()
+_langfuse_client = get_langfuse_client()
 
 
 import logging
@@ -415,7 +380,6 @@ async def _apply_persona_audit(
                 # Get the current trace ID
                 trace_id = None
                 try:
-                    from langfuse.decorators import langfuse_context
                     if hasattr(langfuse_context, "get_current_trace_id"):
                         trace_id = langfuse_context.get_current_trace_id()
                     if not trace_id:
@@ -426,38 +390,42 @@ async def _apply_persona_audit(
                 if trace_id:
                     # Log individual scores
                     if audit.structure_policy_score is not None:
-                        _langfuse_client.score(
+                        log_score(
+                            _langfuse_client,
                             trace_id=trace_id,
                             name="persona_structure_policy",
                             value=audit.structure_policy_score,
-                            data_type="NUMERIC"
+                            data_type="NUMERIC",
                         )
                     if audit.voice_score is not None:
-                        _langfuse_client.score(
+                        log_score(
+                            _langfuse_client,
                             trace_id=trace_id,
                             name="persona_voice_fidelity",
                             value=audit.voice_score,
-                            data_type="NUMERIC"
+                            data_type="NUMERIC",
                         )
                     if audit.final_persona_score is not None:
-                        _langfuse_client.score(
+                        log_score(
+                            _langfuse_client,
                             trace_id=trace_id,
                             name="persona_overall",
                             value=audit.final_persona_score,
-                            data_type="NUMERIC"
+                            data_type="NUMERIC",
                         )
                     
                     # Log rewrite flag
                     if audit.rewrite_applied:
-                        _langfuse_client.score(
+                        log_score(
+                            _langfuse_client,
                             trace_id=trace_id,
                             name="persona_rewrite_applied",
                             value=1,
                             comment=f"Reasons: {', '.join(audit.rewrite_reason_categories)}",
-                            data_type="BOOLEAN"
+                            data_type="BOOLEAN",
                         )
                     
-                    _langfuse_client.flush()
+                    flush_client(_langfuse_client)
         except Exception as e:
             logger.debug(f"Failed to log persona scores to Langfuse: {e}")
         

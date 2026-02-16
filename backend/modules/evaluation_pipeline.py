@@ -7,8 +7,10 @@ Designed to be non-blocking to response generation.
 
 import asyncio
 import logging
+import os
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
+from modules.langfuse_sdk import flush_client, log_score
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +35,31 @@ class EvaluationPipeline:
     
     def _init_langfuse(self):
         """Check if Langfuse is available."""
+        public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
+        secret_key = os.getenv("LANGFUSE_SECRET_KEY")
+        if not (public_key and secret_key):
+            self._langfuse_available = False
+            self._client = None
+            return
+
         try:
             from langfuse import get_client
             self._client = get_client()
             self._langfuse_available = True
         except Exception:
             self._langfuse_available = False
+            self._client = None
+            try:
+                from langfuse import Langfuse
+                host = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
+                self._client = Langfuse(
+                    public_key=public_key,
+                    secret_key=secret_key,
+                    host=host,
+                )
+                self._langfuse_available = True
+            except Exception:
+                self._client = None
     
     async def evaluate_response(
         self,
@@ -187,34 +208,37 @@ class EvaluationPipeline:
             # Log individual scores
             for name, result in scores.items():
                 if result and result.get("score") is not None:
-                    self._client.score(
+                    log_score(
+                        self._client,
                         trace_id=trace_id,
                         name=name,
                         value=result["score"],
                         comment=result.get("reasoning", "")[:255],
-                        data_type="NUMERIC"
+                        data_type="NUMERIC",
                     )
             
             # Log overall score
-            self._client.score(
+            log_score(
+                self._client,
                 trace_id=trace_id,
                 name="overall_quality",
                 value=overall_score,
-                data_type="NUMERIC"
+                data_type="NUMERIC",
             )
             
             # Flag for review if needed
             if needs_review:
-                self._client.score(
+                log_score(
+                    self._client,
                     trace_id=trace_id,
                     name="needs_review",
                     value=1,
                     comment=f"Flags: {', '.join(flags)}",
-                    data_type="BOOLEAN"
+                    data_type="BOOLEAN",
                 )
             
             # Flush to ensure scores are sent
-            self._client.flush()
+            flush_client(self._client)
             
         except Exception as e:
             logger.error(f"Failed to log scores to Langfuse: {e}")

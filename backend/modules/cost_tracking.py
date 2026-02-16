@@ -8,6 +8,7 @@ import logging
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from modules.langfuse_sdk import flush_client, log_score
 
 logger = logging.getLogger(__name__)
 
@@ -77,25 +78,28 @@ class CostTracker:
         # Log to Langfuse
         if self._langfuse_available:
             try:
-                self._client.score(
+                log_score(
+                    self._client,
                     trace_id=trace_id,
                     name="input_tokens",
                     value=input_tokens,
-                    data_type="NUMERIC"
+                    data_type="NUMERIC",
                 )
-                self._client.score(
+                log_score(
+                    self._client,
                     trace_id=trace_id,
                     name="output_tokens",
                     value=output_tokens,
-                    data_type="NUMERIC"
+                    data_type="NUMERIC",
                 )
-                self._client.score(
+                log_score(
+                    self._client,
                     trace_id=trace_id,
                     name="cost_usd",
                     value=cost,
-                    data_type="NUMERIC"
+                    data_type="NUMERIC",
                 )
-                self._client.flush()
+                flush_client(self._client)
             except Exception as e:
                 logger.debug(f"Failed to log cost to Langfuse: {e}")
         

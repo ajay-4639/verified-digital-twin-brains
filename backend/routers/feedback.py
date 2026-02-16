@@ -11,6 +11,7 @@ from typing import Optional, Literal, List
 from enum import Enum
 
 from modules.auth_guard import get_current_user, verify_conversation_ownership, verify_twin_ownership
+from modules.langfuse_sdk import flush_client, get_client as get_langfuse_client, log_score
 from modules.observability import supabase
 from modules.persona_feedback_learning import record_feedback_training_event
 from modules.persona_feedback_learning_jobs import enqueue_feedback_learning_job
@@ -69,12 +70,11 @@ async def submit_feedback(
 
     langfuse_error: Optional[str] = None
     try:
-        from langfuse import get_client
-
-        client = get_client()
+        client = get_langfuse_client()
         if client:
             # Log score to Langfuse
-            client.score(
+            log_score(
+                client,
                 trace_id=trace_id,
                 name="user_feedback",
                 value=request.score,
@@ -83,14 +83,15 @@ async def submit_feedback(
             )
 
             # Also log reason as separate score for filtering
-            client.score(
+            log_score(
+                client,
                 trace_id=trace_id,
                 name="feedback_reason",
                 value=1 if request.score > 0 else 0,
                 comment=request.reason.value,
                 data_type="CATEGORICAL",
             )
-            client.flush()
+            flush_client(client)
         else:
             langfuse_error = "Langfuse client not available"
     except ImportError:

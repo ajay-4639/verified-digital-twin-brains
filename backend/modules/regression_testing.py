@@ -13,6 +13,7 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from enum import Enum
+from modules.langfuse_sdk import flush_client, log_score
 
 logger = logging.getLogger(__name__)
 
@@ -321,27 +322,30 @@ class RegressionTestRunner:
             )
             
             # Add scores
-            trace.score(
+            log_score(
+                trace,
                 name="regression_pass_rate",
                 value=report.summary["pass_rate"],
-                data_type="NUMERIC"
+                data_type="NUMERIC",
             )
-            trace.score(
+            log_score(
+                trace,
                 name="regression_score_diff",
                 value=report.summary["avg_score_diff"],
-                data_type="NUMERIC"
+                data_type="NUMERIC",
             )
             
             # Flag if failures
             if report.failed > 0:
-                trace.score(
+                log_score(
+                    trace,
                     name="regression_has_failures",
                     value=1,
                     comment=f"{report.failed} items regressed",
-                    data_type="BOOLEAN"
+                    data_type="BOOLEAN",
                 )
             
-            self._client.flush()
+            flush_client(self._client)
             
         except Exception as e:
             logger.error(f"Failed to log regression report to Langfuse: {e}")

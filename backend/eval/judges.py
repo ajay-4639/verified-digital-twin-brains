@@ -12,6 +12,7 @@ import json
 from typing import Dict, Any, Optional, List
 import logging
 import re
+from modules.langfuse_sdk import flush_client, get_client as get_langfuse_client, log_score
 
 logger = logging.getLogger(__name__)
 
@@ -194,25 +195,26 @@ async def run_online_eval(
     
     # Log scores to Langfuse
     try:
-        from langfuse import get_client
-        client = get_client()
+        client = get_langfuse_client()
         
         if faithfulness_result.get("score") is not None:
-            client.score(
+            log_score(
+                client,
                 trace_id=trace_id,
                 name="faithfulness",
                 value=faithfulness_result["score"],
                 comment=faithfulness_result.get("reasoning", ""),
-                data_type="NUMERIC"
+                data_type="NUMERIC",
             )
         
         if citation_result.get("score") is not None:
-            client.score(
+            log_score(
+                client,
                 trace_id=trace_id,
                 name="citation_alignment",
                 value=citation_result["score"],
                 comment=citation_result.get("reasoning", ""),
-                data_type="NUMERIC"
+                data_type="NUMERIC",
             )
         
         # Flag for review if below threshold
@@ -222,15 +224,16 @@ async def run_online_eval(
         )
         
         if needs_review:
-            client.score(
+            log_score(
+                client,
                 trace_id=trace_id,
                 name="needs_review",
                 value=1,
                 comment="Low confidence - flagged for manual review",
-                data_type="BOOLEAN"
+                data_type="BOOLEAN",
             )
         
-        client.flush()
+        flush_client(client)
         
     except Exception as e:
         logger.error(f"Failed to log eval scores: {e}")

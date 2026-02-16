@@ -10,6 +10,7 @@ import logging
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 from functools import lru_cache
+from modules.langfuse_sdk import langfuse_context
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +209,6 @@ class LangfusePromptManager:
     def _track_prompt_usage(self, name: str, version: str, source: str):
         """Track prompt usage in current Langfuse observation."""
         try:
-            from langfuse.decorators import langfuse_context
             langfuse_context.update_current_observation(
                 metadata={
                     "prompt_name": name,
@@ -338,7 +338,6 @@ def track_prompt_usage(prompt_name: str, prompt_version: str):
     Call this inside an @observe'd function.
     """
     try:
-        from langfuse.decorators import langfuse_context
         langfuse_context.update_current_observation(
             metadata={
                 "prompt_name": prompt_name,

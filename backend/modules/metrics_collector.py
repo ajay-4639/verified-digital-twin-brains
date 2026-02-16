@@ -9,6 +9,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 from dataclasses import dataclass
+from modules.langfuse_sdk import flush_client, log_score
 
 logger = logging.getLogger(__name__)
 
@@ -57,19 +58,21 @@ class MetricsCollector:
             return
         try:
             if self._request_count:
-                self._client.score(
+                log_score(
+                    self._client,
                     name="requests_count",
                     value=self._request_count,
                     data_type="NUMERIC",
                 )
             if self._latency_ms:
                 avg_latency = sum(self._latency_ms) / len(self._latency_ms)
-                self._client.score(
+                log_score(
+                    self._client,
                     name="agent_latency_ms",
                     value=avg_latency,
                     data_type="NUMERIC",
                 )
-            self._client.flush()
+            flush_client(self._client)
         except Exception as e:
             logger.debug(f"Failed to flush metrics collector data: {e}")
     

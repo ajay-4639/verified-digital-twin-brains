@@ -1004,10 +1004,10 @@ async def chat(
             # CRITICAL FIX H4: Proper cleanup on stream end or disconnect
             # =================================================================
             try:
-                # Flush Langfuse traces if they exist
-                if 'langfuse' in locals():
+                # Flush Langfuse traces if client is available.
+                if _langfuse_client:
                     try:
-                        langfuse.flush()
+                        flush_client(_langfuse_client)
                         print(f"[Chat] Langfuse traces flushed for conversation {conversation_id}")
                     except Exception as flush_err:
                         print(f"[Chat] Langfuse flush error (non-critical): {flush_err}")

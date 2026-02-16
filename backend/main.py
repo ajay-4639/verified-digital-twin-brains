@@ -255,6 +255,28 @@ async def health_deep():
         },
     }
 
+
+@app.get("/health/langfuse", tags=["health"])
+async def health_langfuse():
+    """
+    Lightweight Langfuse wiring diagnostics (no secrets).
+    Useful for confirming whether tracing is enabled in runtime config.
+    """
+    try:
+        from modules.langfuse_sdk import runtime_status
+
+        return {
+            "status": "ok",
+            "langfuse": runtime_status(),
+            "timestamp": time.time(),
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "timestamp": time.time(),
+        }
+
 # ============================================================================
 # P0 Deployment: Version Endpoint for Deployment Verification
 # ============================================================================

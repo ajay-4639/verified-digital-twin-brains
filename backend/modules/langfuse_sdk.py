@@ -250,3 +250,27 @@ def flush_client(client: Any) -> None:
             flush()
         except Exception:
             pass
+
+
+def runtime_status() -> dict:
+    """Return non-sensitive runtime diagnostics for Langfuse integration."""
+    client = get_client()
+    return {
+        "mode": _langfuse_mode,
+        "installed": is_installed(),
+        "credentials_configured": has_credentials(),
+        "enabled": is_enabled(),
+        "host": _host(),
+        "client_ready": bool(client),
+    }
+
+
+if _langfuse_mode == "none":
+    logger.warning("Langfuse SDK unavailable - tracing disabled")
+elif not _has_credentials():
+    logger.warning(
+        "Langfuse SDK loaded (mode=%s) but credentials are missing; tracing export disabled",
+        _langfuse_mode,
+    )
+else:
+    logger.info("Langfuse SDK ready (mode=%s, host=%s)", _langfuse_mode, _host())

@@ -6,7 +6,6 @@ from typing import Annotated, TypedDict, List, Dict, Any, Union, Optional
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode
 try:
     from langfuse.decorators import observe, langfuse_context
     _langfuse_available = True
@@ -27,7 +26,6 @@ except ImportError:
 
     langfuse_context = _MockLangfuseContext()
 
-from modules.tools import get_retrieval_tool
 from modules.observability import supabase
 from modules.persona_compiler import (
     compile_prompt_plan,

@@ -50,13 +50,13 @@ export default function DeleteTwinModal({
         try {
             // Fetch knowledge sources count
             const knowledgeRes = await fetch(
-                `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/twins/${twinId}/knowledge`,
+                `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/sources/${twinId}`,
                 { credentials: 'include' }
             );
             
             // Fetch conversations count  
             const conversationsRes = await fetch(
-                `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/twins/${twinId}/conversations`,
+                `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/conversations/${twinId}`,
                 { credentials: 'include' }
             );
 

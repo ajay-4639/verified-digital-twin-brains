@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, R
 from fastapi.responses import JSONResponse
 from modules.auth_guard import verify_owner, get_current_user, verify_twin_ownership, verify_source_ownership
 from modules.ingestion import detect_url_provider, extract_text_from_docx, extract_text_from_excel, extract_text_from_pdf
-from modules.observability import supabase
+from modules.observability import supabase, log_ingestion_event
 from modules.training_jobs import create_training_job, get_training_job, process_training_queue, list_training_jobs
 from modules.job_queue import enqueue_job
 from pydantic import BaseModel

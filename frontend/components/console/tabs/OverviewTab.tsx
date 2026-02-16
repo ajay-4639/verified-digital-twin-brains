@@ -5,10 +5,11 @@ import Link from 'next/link';
 
 interface Conversation {
     id: string;
-    preview: string;
-    message_count: number;
+    preview?: string;
+    last_message?: string;
+    message_count?: number;
     created_at: string;
-    updated_at: string;
+    updated_at?: string;
 }
 
 interface OverviewTabProps {
@@ -50,7 +51,7 @@ export function OverviewTab({ twinId, stats }: OverviewTabProps) {
             setConversationsLoading(true);
             setConversationsError(null);
             try {
-                const response = await fetch(`${API_URL}/twins/${twinId}/conversations?limit=5`, {
+                const response = await fetch(`${API_URL}/conversations/${twinId}?limit=5`, {
                     credentials: 'include'
                 });
                 if (response.ok) {
@@ -204,8 +205,8 @@ export function OverviewTab({ twinId, stats }: OverviewTabProps) {
                                 >
                                     <div className="flex items-start justify-between">
                                         <div className="flex-1 min-w-0">
-                                            <p className="text-white text-sm truncate">{conv.preview || 'New conversation'}</p>
-                                            <p className="text-slate-500 text-xs mt-1">{conv.message_count} messages</p>
+                                            <p className="text-white text-sm truncate">{conv.preview || conv.last_message || 'New conversation'}</p>
+                                            <p className="text-slate-500 text-xs mt-1">{conv.message_count ?? 0} messages</p>
                                         </div>
                                         <span className="text-slate-600 text-xs shrink-0 ml-2">
                                             {formatTimeAgo(conv.updated_at || conv.created_at)}

@@ -50,6 +50,8 @@ services:
         sync: false
       - key: PINECONE_API_KEY
         sync: false
+      - key: PINECONE_INDEX_NAME
+        sync: false
       - key: DATABASE_URL
         sync: false
       - key: CEREBRAS_API_KEY
@@ -58,9 +60,56 @@ services:
         sync: false
       - key: JWT_SECRET
         sync: false
-    
+
     # Ephemeral disk for temp files
     disk:
       name: tmp
       mountPath: /tmp
       sizeGB: 1
+
+  - type: worker
+    name: verified-digital-twin-brain-worker
+    runtime: python
+    plan: standard
+    region: oregon
+
+    buildCommand: |
+      echo "=== Starting Worker Build ==="
+      pip install --upgrade pip
+      pip install --no-cache-dir -r backend/requirements.txt
+      echo "=== Worker Build Complete ==="
+
+    startCommand: |
+      echo "=== Starting Worker ==="
+      cd backend
+      python worker.py
+
+    autoDeploy: true
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: PYTHONUNBUFFERED
+        value: "true"
+      - key: PIP_NO_CACHE_DIR
+        value: "true"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: PINECONE_INDEX_NAME
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: CEREBRAS_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: REDIS_URL
+        sync: false

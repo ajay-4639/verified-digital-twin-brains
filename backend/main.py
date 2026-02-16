@@ -1,5 +1,5 @@
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 import os
 import sys
 import time
@@ -207,10 +207,23 @@ async def health_check():
         "uptime_seconds": uptime_seconds,
     }
 
+@app.head("/health", tags=["health"])
+async def health_check_head():
+    """
+    Render and other platforms may use HEAD probes.
+    Return 200 explicitly so readiness checks don't fail with 405.
+    """
+    return Response(status_code=200)
+
 @app.get("/", tags=["health"])
 async def root_health():
     """Fallback health check for platforms checking the root path."""
     return await health_check()
+
+@app.head("/", tags=["health"])
+async def root_health_head():
+    """HEAD variant for platform probes that hit the root path."""
+    return Response(status_code=200)
 
 
 @app.get("/health/deep", tags=["health"])

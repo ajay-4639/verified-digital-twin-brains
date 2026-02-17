@@ -2,6 +2,7 @@ import os
 import asyncio
 import json
 import re
+import time
 from typing import Annotated, TypedDict, List, Dict, Any, Union, Optional
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
@@ -36,6 +37,14 @@ except ImportError:
 
 # Global checkpointer instance (singleton)
 _checkpointer = None
+
+_ROUTER_KNOWLEDGE_CACHE_TTL_SECONDS = float(
+    os.getenv("ROUTER_KNOWLEDGE_CACHE_TTL_SECONDS", "30")
+)
+_ROUTER_FORCE_RETRIEVAL_WITH_KNOWLEDGE = (
+    os.getenv("ROUTER_FORCE_RETRIEVAL_WITH_KNOWLEDGE", "true").lower() == "true"
+)
+_router_knowledge_cache: Dict[str, Dict[str, Any]] = {}
 
 def get_checkpointer():
     """
@@ -345,6 +354,68 @@ def build_system_prompt(state: TwinState) -> str:
     return prompt
 
 
+def _twin_has_groundable_knowledge(twin_id: Optional[str]) -> bool:
+    """
+    Lightweight runtime signal for router policy.
+    True when the twin has any persisted source / verified QnA / graph node.
+    """
+    if not twin_id:
+        return False
+
+    now = time.time()
+    cached = _router_knowledge_cache.get(twin_id)
+    if cached and (now - float(cached.get("ts", 0))) <= _ROUTER_KNOWLEDGE_CACHE_TTL_SECONDS:
+        return bool(cached.get("has_knowledge", False))
+
+    has_knowledge = False
+    try:
+        # Prefer cheap existence checks (limit 1) to avoid heavy counts.
+        src_res = (
+            supabase.table("sources")
+            .select("id")
+            .eq("twin_id", twin_id)
+            .in_("status", ["live", "processed"])
+            .limit(1)
+            .execute()
+        )
+        has_knowledge = bool(src_res.data)
+
+        if not has_knowledge:
+            qna_res = (
+                supabase.table("verified_qna")
+                .select("id")
+                .eq("twin_id", twin_id)
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
+            )
+            has_knowledge = bool(qna_res.data)
+
+        if not has_knowledge:
+            nodes_res = supabase.rpc("get_nodes_system", {"t_id": twin_id, "limit_val": 1}).execute()
+            has_knowledge = bool(nodes_res.data)
+    except Exception as e:
+        print(f"[Router] Knowledge availability check failed for twin {twin_id}: {e}")
+        has_knowledge = False
+
+    _router_knowledge_cache[twin_id] = {"ts": now, "has_knowledge": has_knowledge}
+    return has_knowledge
+
+
+def _is_identity_intro_query(query: str) -> bool:
+    q = (query or "").strip().lower()
+    if not q:
+        return False
+    markers = (
+        "who are you",
+        "what are you",
+        "introduce yourself",
+        "tell me about yourself",
+        "what can you do",
+    )
+    return any(marker in q for marker in markers)
+
+
 def _is_smalltalk_query(query: str) -> bool:
     q = (query or "").strip().lower()
     if not q:
@@ -519,9 +590,23 @@ async def router_node(state: TwinState):
     messages = state["messages"]
     last_human_msg = next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), "")
     interaction_context = (state.get("interaction_context") or "owner_chat").strip().lower()
+    twin_id = state.get("twin_id")
+    knowledge_available = _twin_has_groundable_knowledge(twin_id)
 
     # Deterministic fast-path keeps obvious greetings and owner-specific prompts stable.
     if _is_smalltalk_query(last_human_msg):
+        # Identity prompts should be grounded in owned knowledge when available.
+        if knowledge_available and _is_identity_intro_query(last_human_msg):
+            return {
+                "dialogue_mode": "QA_FACT",
+                "intent_label": classify_query_intent(last_human_msg, dialogue_mode="QA_FACT"),
+                "target_owner_scope": False,
+                "requires_evidence": True,
+                "sub_queries": [last_human_msg],
+                "reasoning_history": (state.get("reasoning_history") or []) + [
+                    "Router: identity prompt rerouted to retrieval-backed QA (knowledge available)"
+                ],
+            }
         return {
             "dialogue_mode": "SMALLTALK",
             "intent_label": classify_query_intent(last_human_msg, dialogue_mode="SMALLTALK"),
@@ -623,6 +708,16 @@ async def router_node(state: TwinState):
 
         # Person-specific queries MUST have evidence verification.
         if is_specific:
+            req_evidence = True
+
+        # Knowledge-aware policy:
+        # When the twin has ingested knowledge, force retrieval for non-smalltalk
+        # modes to keep responses source-grounded by default.
+        if (
+            _ROUTER_FORCE_RETRIEVAL_WITH_KNOWLEDGE
+            and knowledge_available
+            and mode != "SMALLTALK"
+        ):
             req_evidence = True
             
         # Sub-query generation for retrieval. Entity probes benefit from a

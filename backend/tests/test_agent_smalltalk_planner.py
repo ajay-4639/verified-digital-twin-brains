@@ -1,7 +1,7 @@
 import pytest
 from langchain_core.messages import HumanMessage
 
-from modules.agent import planner_node
+from modules.agent import planner_node, realizer_node
 from modules.response_policy import UNCERTAINTY_RESPONSE
 
 
@@ -144,4 +144,82 @@ async def test_planner_comparison_query_extracts_recommendation_from_evidence(mo
     plan = result["planning_output"]
     assert plan["citations"] == ["src-1"]
     assert any("Recommendation:" in point for point in plan["answer_points"])
+    assert plan["render_strategy"] == "source_faithful"
     assert "comparison recommendation extracted" in plan["reasoning_trace"].lower()
+
+
+@pytest.mark.asyncio
+async def test_planner_comparison_query_unlabeled_evidence_uses_source_faithful(monkeypatch):
+    def fake_prompt_builder(_state):
+        return ("system", {"intent_label": "advice_or_stance", "module_ids": []})
+
+    monkeypatch.setattr("modules.agent.build_system_prompt_with_trace", fake_prompt_builder)
+
+    state = {
+        "dialogue_mode": "QA_FACT",
+        "messages": [HumanMessage(content="Should we use containers or serverless for our MVP?")],
+        "retrieved_context": {
+            "results": [
+                {
+                    "source_id": "src-1",
+                    "text": (
+                        "For an early-stage product with a small team, containers on a managed platform "
+                        "are easier to debug and iterate. Serverless can introduce cold starts and timeout "
+                        "constraints during MVP development."
+                    ),
+                }
+            ]
+        },
+        "target_owner_scope": False,
+        "full_settings": {},
+        "intent_label": "advice_or_stance",
+    }
+
+    result = await planner_node(state)
+    plan = result["planning_output"]
+    assert plan["citations"] == ["src-1"]
+    assert plan["render_strategy"] == "source_faithful"
+    assert any(point.startswith("Recommendation:") for point in plan["answer_points"])
+    assert any(point.startswith("Assumptions:") for point in plan["answer_points"])
+    assert any(point.startswith("Why:") for point in plan["answer_points"])
+    assert any(
+        point.startswith("Assumptions:") and ("early-stage" in point.lower() or "small team" in point.lower())
+        for point in plan["answer_points"]
+    )
+    assert any(
+        point.startswith("Why:") and ("cold start" in point.lower() or "timeout" in point.lower())
+        for point in plan["answer_points"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_realizer_source_faithful_plan_avoids_paraphrase(monkeypatch):
+    async def fail_invoke_text(*args, **kwargs):
+        raise AssertionError("invoke_text should not be called in source_faithful mode")
+
+    monkeypatch.setattr("modules.agent.invoke_text", fail_invoke_text)
+
+    state = {
+        "dialogue_mode": "QA_FACT",
+        "planning_output": {
+            "answer_points": [
+                "Recommendation: Start with containers on a managed platform.",
+                "Assumptions: Early-stage product, small team.",
+                "Why: Serverless cold starts can slow MVP iteration.",
+            ],
+            "citations": ["src-1"],
+            "follow_up_question": "",
+            "teaching_questions": [],
+            "render_strategy": "source_faithful",
+        },
+        "intent_label": "advice_or_stance",
+        "persona_module_ids": [],
+    }
+
+    result = await realizer_node(state)
+    msg = result["messages"][0]
+    assert "Recommendation:" in msg.content
+    assert "Assumptions:" in msg.content
+    assert "Why:" in msg.content
+    assert msg.additional_kwargs.get("render_strategy") == "source_faithful"
+    assert result["citations"] == ["src-1"]

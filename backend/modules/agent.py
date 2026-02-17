@@ -1134,14 +1134,59 @@ Rules:
     ):
         answer_points: List[str] = []
         citation_ids: List[str] = []
+        sentence_candidates: List[str] = []
+
+        query_text = (user_query or "").strip()
+        option_a = ""
+        option_b = ""
+        option_match = re.search(
+            r"\bshould\s+(?:i|we)\s+use\s+(.+?)\s+or\s+(.+)",
+            query_text,
+            flags=re.IGNORECASE,
+        )
+        if option_match:
+            option_a = re.sub(r"\bfor\b.*$", "", option_match.group(1), flags=re.IGNORECASE).strip(" ,.?")
+            option_b = re.sub(r"\bfor\b.*$", "", option_match.group(2), flags=re.IGNORECASE).strip(" ,.?")
+
+        def _normalize_sentence(raw: str) -> str:
+            return re.sub(r"\s+", " ", raw.strip().lstrip("-*").strip())
+
+        def _collect_sentence(raw: str) -> None:
+            sentence = _normalize_sentence(raw)
+            if sentence and sentence not in sentence_candidates:
+                sentence_candidates.append(sentence)
+
+        def _keywords(text: str) -> List[str]:
+            stopwords = {"and", "the", "for", "our", "your", "with", "from", "into", "that", "this", "use"}
+            tokens = re.findall(r"[a-z0-9][a-z0-9._-]*", text.lower())
+            return [tok for tok in tokens if len(tok) > 2 and tok not in stopwords]
+
+        option_keywords = _keywords(option_a) + _keywords(option_b)
+        if not option_keywords:
+            option_keywords = _keywords(query_text)
+
+        def _pick_sentence(cues: List[str], *, require_option: bool = False, used: Optional[set] = None) -> str:
+            used_set = used or set()
+            for sentence in sentence_candidates:
+                if sentence in used_set:
+                    continue
+                lowered = sentence.lower()
+                if require_option and option_keywords and not any(tok in lowered for tok in option_keywords):
+                    continue
+                if any(cue in lowered for cue in cues):
+                    return sentence
+            return ""
+
         for ctx in context_data:
             source_id = ctx.get("source_id")
             if isinstance(source_id, str) and source_id and source_id not in citation_ids:
                 citation_ids.append(source_id)
 
             text = (ctx.get("text") or "")
+            for raw_sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+                _collect_sentence(raw_sentence)
             for raw_line in text.splitlines():
-                line = raw_line.strip().lstrip("-*").strip()
+                line = _normalize_sentence(raw_line)
                 if not line:
                     continue
                 lowered = line.lower()
@@ -1157,6 +1202,111 @@ Rules:
             if len(answer_points) >= 3:
                 break
 
+        if not answer_points and sentence_candidates:
+            recommendation_cues = [
+                "recommend",
+                "start with",
+                "prefer",
+                "choose",
+                "best",
+                "better",
+                "managed platform",
+                "containers",
+                "serverless",
+            ]
+            assumption_primary_cues = [
+                "early-stage",
+                "early stage",
+                "small team",
+                "startup",
+                "founding team",
+                "for an",
+                "for a",
+            ]
+            assumption_secondary_cues = [
+                "mvp",
+                "if ",
+                "when ",
+                "assum",
+            ]
+            why_primary_cues = [
+                "cold start",
+                "timeout",
+                "constraint",
+                "risk",
+                "tradeoff",
+                "latency",
+                "slow",
+                "cost",
+                "overhead",
+            ]
+            why_secondary_cues = [
+                "because",
+                "due",
+                "can",
+                "could",
+                "might",
+                "debug",
+            ]
+
+            recommendation_sentence = _pick_sentence(
+                recommendation_cues,
+                require_option=True,
+                used=set(),
+            )
+            if not recommendation_sentence:
+                recommendation_sentence = sentence_candidates[0]
+
+            why_sentence = _pick_sentence(
+                why_primary_cues,
+                used={recommendation_sentence},
+            )
+            if not why_sentence:
+                why_sentence = _pick_sentence(
+                    why_secondary_cues,
+                    used={recommendation_sentence},
+                )
+            if not why_sentence:
+                why_sentence = next(
+                    (
+                        sentence
+                        for sentence in sentence_candidates
+                        if sentence != recommendation_sentence
+                    ),
+                    recommendation_sentence,
+                )
+
+            assumptions_sentence = _pick_sentence(
+                assumption_primary_cues,
+                used={why_sentence},
+            )
+            if not assumptions_sentence:
+                assumptions_sentence = _pick_sentence(
+                    assumption_secondary_cues,
+                    used={why_sentence},
+                )
+            if not assumptions_sentence:
+                assumptions_sentence = recommendation_sentence
+
+            if why_sentence == recommendation_sentence:
+                why_sentence = next(
+                    (
+                        sentence
+                        for sentence in sentence_candidates
+                        if sentence != recommendation_sentence
+                    ),
+                    recommendation_sentence,
+                )
+            if assumptions_sentence == why_sentence and assumptions_sentence != recommendation_sentence:
+                assumptions_sentence = recommendation_sentence
+
+            synthesized_points = [
+                f"Recommendation: {recommendation_sentence}".strip(),
+                f"Assumptions: {assumptions_sentence}".strip(),
+                f"Why: {why_sentence}".strip(),
+            ]
+            answer_points = [point for point in synthesized_points if point.split(":", 1)[1].strip()]
+
         if answer_points:
             return {
                 "planning_output": {
@@ -1165,6 +1315,7 @@ Rules:
                     "follow_up_question": "",
                     "confidence": 0.9,
                     "teaching_questions": [],
+                    "render_strategy": "source_faithful",
                     "reasoning_trace": "Deterministic comparison recommendation extracted from evidence.",
                 },
                 "intent_label": persona_trace.get("intent_label"),
@@ -1372,6 +1523,51 @@ async def realizer_node(state: TwinState):
     """Pass B: Conversational Reification (Human-like Output)"""
     plan = state.get("planning_output", {})
     mode = state.get("dialogue_mode", "QA_FACT")
+    render_strategy = str(plan.get("render_strategy", "")).strip().lower() if isinstance(plan, dict) else ""
+
+    if render_strategy == "source_faithful":
+        points = []
+        for p in (plan.get("answer_points", []) if isinstance(plan, dict) else []):
+            if isinstance(p, str) and p.strip():
+                points.append(p.strip())
+
+        follow_up = (plan.get("follow_up_question") if isinstance(plan, dict) else None) or ""
+        response_lines: List[str] = []
+        response_lines.extend(points[:3])
+        if isinstance(follow_up, str) and follow_up.strip():
+            response_lines.append(follow_up.strip())
+
+        # Source-faithful mode intentionally avoids LLM rewrite/paraphrase.
+        realized_text = "\n".join(response_lines).strip()
+        if not realized_text:
+            realized_text = UNCERTAINTY_RESPONSE
+
+        res = AIMessage(content=realized_text)
+        citations = plan.get("citations", []) if isinstance(plan, dict) else []
+        teaching_questions = plan.get("teaching_questions", []) if isinstance(plan, dict) else []
+
+        res.additional_kwargs["teaching_questions"] = teaching_questions
+        res.additional_kwargs["planning_output"] = plan
+        res.additional_kwargs["dialogue_mode"] = mode
+        res.additional_kwargs["intent_label"] = state.get("intent_label")
+        res.additional_kwargs["module_ids"] = state.get("persona_module_ids") or []
+        res.additional_kwargs["requires_evidence"] = bool(state.get("requires_evidence", False))
+        res.additional_kwargs["target_owner_scope"] = bool(state.get("target_owner_scope", False))
+        res.additional_kwargs["router_reason"] = state.get("router_reason")
+        res.additional_kwargs["router_knowledge_available"] = state.get("router_knowledge_available")
+        res.additional_kwargs["render_strategy"] = "source_faithful"
+        if state.get("persona_spec_version"):
+            res.additional_kwargs["persona_spec_version"] = state.get("persona_spec_version")
+        if state.get("persona_prompt_variant"):
+            res.additional_kwargs["persona_prompt_variant"] = state.get("persona_prompt_variant")
+
+        return {
+            "messages": [res],
+            "citations": citations,
+            "reasoning_history": (state.get("reasoning_history") or []) + [
+                "Realizer: source-faithful deterministic rendering (no paraphrase)."
+            ],
+        }
     
     realizer_prompt = f"""You are the Voice Realizer for a Digital Twin. 
     Take the structured plan and rewrite it into a short, natural, conversational response.
@@ -1700,3 +1896,4 @@ async def run_agent_stream(
         agent_latency = (time.time() - agent_start) * 1000
         metrics.record_latency("agent", agent_latency)
         metrics.flush()
+

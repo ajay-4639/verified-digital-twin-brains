@@ -59,6 +59,10 @@ export default function ChatInterface({
     owner_memory_topics?: string[];
     clarification_id?: string | null;
     planning_output?: any;
+    requires_evidence?: boolean | null;
+    target_owner_scope?: boolean | null;
+    router_reason?: string | null;
+    router_knowledge_available?: boolean | null;
   }>({});
 
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -380,7 +384,11 @@ export default function ChatInterface({
           used_owner_memory: Boolean(data.used_owner_memory),
           owner_memory_refs: Array.isArray(data.owner_memory_refs) ? data.owner_memory_refs : [],
           owner_memory_topics: Array.isArray(data.owner_memory_topics) ? data.owner_memory_topics : [],
-          clarification_id: data.clarification_id || null
+          clarification_id: data.clarification_id || null,
+          requires_evidence: null,
+          target_owner_scope: null,
+          router_reason: null,
+          router_knowledge_available: null
         });
         return;
       }
@@ -447,7 +455,11 @@ export default function ChatInterface({
                   used_owner_memory: false,
                   owner_memory_refs: [],
                   owner_memory_topics: proposedTopic ? [proposedTopic] : [],
-                  clarification_id: data.clarification_id || null
+                  clarification_id: data.clarification_id || null,
+                  requires_evidence: null,
+                  target_owner_scope: null,
+                  router_reason: null,
+                  router_knowledge_available: null
                 });
                 setMessages((prev) => {
                   const last = [...prev];
@@ -484,7 +496,13 @@ export default function ChatInterface({
                   owner_memory_refs: ownerMemoryRefs,
                   owner_memory_topics: ownerMemoryTopics,
                   clarification_id: null,
-                  planning_output: data.planning_output
+                  planning_output: data.planning_output,
+                  requires_evidence: typeof data.requires_evidence === 'boolean' ? data.requires_evidence : null,
+                  target_owner_scope: typeof data.target_owner_scope === 'boolean' ? data.target_owner_scope : null,
+                  router_reason: typeof data.router_reason === 'string' ? data.router_reason : null,
+                  router_knowledge_available: typeof data.router_knowledge_available === 'boolean'
+                    ? data.router_knowledge_available
+                    : null
                 });
 
                 // Extract graph_used from metadata
@@ -539,7 +557,11 @@ export default function ChatInterface({
               used_owner_memory: false,
               owner_memory_refs: [],
               owner_memory_topics: proposedTopic ? [proposedTopic] : [],
-              clarification_id: data.clarification_id || null
+              clarification_id: data.clarification_id || null,
+              requires_evidence: null,
+              target_owner_scope: null,
+              router_reason: null,
+              router_knowledge_available: null
             });
             setMessages((prev) => {
               const last = [...prev];
@@ -576,7 +598,13 @@ export default function ChatInterface({
               owner_memory_refs: ownerMemoryRefs,
               owner_memory_topics: ownerMemoryTopics,
               clarification_id: null,
-              planning_output: data.planning_output
+              planning_output: data.planning_output,
+              requires_evidence: typeof data.requires_evidence === 'boolean' ? data.requires_evidence : null,
+              target_owner_scope: typeof data.target_owner_scope === 'boolean' ? data.target_owner_scope : null,
+              router_reason: typeof data.router_reason === 'string' ? data.router_reason : null,
+              router_knowledge_available: typeof data.router_knowledge_available === 'boolean'
+                ? data.router_knowledge_available
+                : null
             });
 
             const graphUsed = data.graph_context?.graph_used || false;
@@ -795,10 +823,18 @@ export default function ChatInterface({
                 <div className="flex flex-wrap gap-3 text-[10px] text-slate-600">
                   <span>IdentityGate: <strong>{lastDebug.decision || 'UNKNOWN'}</strong></span>
                   <span>Used Owner Memory: <strong>{lastDebug.used_owner_memory ? 'Yes' : 'No'}</strong></span>
+                  <span>Requires Evidence: <strong>{typeof lastDebug.requires_evidence === 'boolean' ? (lastDebug.requires_evidence ? 'Yes' : 'No') : 'Unknown'}</strong></span>
+                  <span>Owner Scope: <strong>{typeof lastDebug.target_owner_scope === 'boolean' ? (lastDebug.target_owner_scope ? 'Yes' : 'No') : 'Unknown'}</strong></span>
+                  <span>Knowledge Available: <strong>{typeof lastDebug.router_knowledge_available === 'boolean' ? (lastDebug.router_knowledge_available ? 'Yes' : 'No') : 'Unknown'}</strong></span>
                   {lastDebug.clarification_id && (
                     <span>Clarification ID: <strong>{lastDebug.clarification_id}</strong></span>
                   )}
                 </div>
+                {lastDebug.router_reason && (
+                  <div className="text-[10px] text-slate-600">
+                    Router Reason: <strong>{lastDebug.router_reason}</strong>
+                  </div>
+                )}
                 <div className="text-[10px] text-slate-600">
                   Owner Memory Topics:{' '}
                   <strong>

@@ -202,6 +202,8 @@ class TwinState(TypedDict):
     persona_module_ids: Optional[List[str]]
     persona_spec_version: Optional[str]
     persona_prompt_variant: Optional[str]
+    router_reason: Optional[str]
+    router_knowledge_available: Optional[bool]
     
     # Path B / Phase 4 Context
     full_settings: Optional[Dict[str, Any]]
@@ -556,6 +558,33 @@ def _is_entity_probe_query(query: str) -> bool:
     return any(re.search(p, q) for p in patterns)
 
 
+def _log_router_observation(
+    *,
+    mode: str,
+    intent_label: str,
+    requires_evidence: bool,
+    target_owner_scope: bool,
+    interaction_context: str,
+    knowledge_available: bool,
+    router_reason: Optional[str],
+) -> None:
+    """Best-effort router span metadata for Langfuse diagnostics."""
+    try:
+        langfuse_context.update_current_observation(
+            metadata={
+                "router_mode": mode,
+                "router_intent_label": intent_label,
+                "router_requires_evidence": bool(requires_evidence),
+                "router_target_owner_scope": bool(target_owner_scope),
+                "router_interaction_context": interaction_context,
+                "router_knowledge_available": bool(knowledge_available),
+                "router_reason": (router_reason or "")[:500],
+            }
+        )
+    except Exception:
+        pass
+
+
 def _build_router_prompt(user_query: str, interaction_context: str) -> str:
     return f"""You are a Strategic Dialogue Router for a Digital Twin.
 Classify the user's intent to determine retrieval and evidence requirements.
@@ -597,22 +626,48 @@ async def router_node(state: TwinState):
     if _is_smalltalk_query(last_human_msg):
         # Identity prompts should be grounded in owned knowledge when available.
         if knowledge_available and _is_identity_intro_query(last_human_msg):
+            router_reason = "identity prompt rerouted to QA_FACT with evidence because knowledge is available"
+            intent_label = classify_query_intent(last_human_msg, dialogue_mode="QA_FACT")
+            _log_router_observation(
+                mode="QA_FACT",
+                intent_label=intent_label,
+                requires_evidence=True,
+                target_owner_scope=False,
+                interaction_context=interaction_context,
+                knowledge_available=knowledge_available,
+                router_reason=router_reason,
+            )
             return {
                 "dialogue_mode": "QA_FACT",
-                "intent_label": classify_query_intent(last_human_msg, dialogue_mode="QA_FACT"),
+                "intent_label": intent_label,
                 "target_owner_scope": False,
                 "requires_evidence": True,
                 "sub_queries": [last_human_msg],
+                "router_reason": router_reason,
+                "router_knowledge_available": knowledge_available,
                 "reasoning_history": (state.get("reasoning_history") or []) + [
                     "Router: identity prompt rerouted to retrieval-backed QA (knowledge available)"
                 ],
             }
+        router_reason = "deterministic SMALLTALK fast-path"
+        intent_label = classify_query_intent(last_human_msg, dialogue_mode="SMALLTALK")
+        _log_router_observation(
+            mode="SMALLTALK",
+            intent_label=intent_label,
+            requires_evidence=False,
+            target_owner_scope=False,
+            interaction_context=interaction_context,
+            knowledge_available=knowledge_available,
+            router_reason=router_reason,
+        )
         return {
             "dialogue_mode": "SMALLTALK",
-            "intent_label": classify_query_intent(last_human_msg, dialogue_mode="SMALLTALK"),
+            "intent_label": intent_label,
             "target_owner_scope": False,
             "requires_evidence": False,
             "sub_queries": [],
+            "router_reason": router_reason,
+            "router_knowledge_available": knowledge_available,
             "reasoning_history": (state.get("reasoning_history") or []) + [
                 "Router: deterministic SMALLTALK fast-path"
             ],
@@ -713,12 +768,14 @@ async def router_node(state: TwinState):
         # Knowledge-aware policy:
         # When the twin has ingested knowledge, force retrieval for non-smalltalk
         # modes to keep responses source-grounded by default.
+        knowledge_forced_retrieval = False
         if (
             _ROUTER_FORCE_RETRIEVAL_WITH_KNOWLEDGE
             and knowledge_available
             and mode != "SMALLTALK"
         ):
             req_evidence = True
+            knowledge_forced_retrieval = True
             
         # Sub-query generation for retrieval. Entity probes benefit from a
         # normalized factual variant ("what is X") in addition to raw phrasing.
@@ -736,12 +793,30 @@ async def router_node(state: TwinState):
                     if normalized not in sub_queries:
                         sub_queries.insert(0, normalized)
         
+        router_reason = (
+            f"mode={mode}; intent={intent_label}; specific={is_specific}; "
+            f"requires_evidence={req_evidence}; context={interaction_context}; "
+            f"knowledge_available={knowledge_available}; "
+            f"knowledge_forced_retrieval={knowledge_forced_retrieval}; "
+            f"explicit_source_grounded={explicit_source_grounded}; explicit_teaching={explicit_teaching}"
+        )
+        _log_router_observation(
+            mode=mode,
+            intent_label=intent_label,
+            requires_evidence=req_evidence,
+            target_owner_scope=is_specific,
+            interaction_context=interaction_context,
+            knowledge_available=knowledge_available,
+            router_reason=router_reason,
+        )
         return {
             "dialogue_mode": mode,
             "intent_label": intent_label,
             "target_owner_scope": is_specific,
             "requires_evidence": req_evidence,
             "sub_queries": sub_queries,
+            "router_reason": router_reason,
+            "router_knowledge_available": knowledge_available,
             "reasoning_history": (state.get("reasoning_history") or [])
             + [f"Router: Mode={mode}, Intent={intent_label}, Specific={is_specific}"]
         }
@@ -763,18 +838,44 @@ async def router_node(state: TwinState):
             pass
         if _is_smalltalk_query(last_human_msg):
             fallback_intent = classify_query_intent(last_human_msg, dialogue_mode="SMALLTALK")
+            fallback_reason = "router exception fallback to SMALLTALK"
+            _log_router_observation(
+                mode="SMALLTALK",
+                intent_label=fallback_intent,
+                requires_evidence=False,
+                target_owner_scope=False,
+                interaction_context=interaction_context,
+                knowledge_available=knowledge_available,
+                router_reason=fallback_reason,
+            )
             return {
                 "dialogue_mode": "SMALLTALK",
                 "intent_label": fallback_intent,
+                "target_owner_scope": False,
                 "requires_evidence": False,
                 "sub_queries": [],
+                "router_reason": fallback_reason,
+                "router_knowledge_available": knowledge_available,
             }
         fallback_intent = classify_query_intent(last_human_msg, dialogue_mode="QA_FACT")
+        fallback_reason = "router exception fallback to QA_FACT with evidence"
+        _log_router_observation(
+            mode="QA_FACT",
+            intent_label=fallback_intent,
+            requires_evidence=True,
+            target_owner_scope=False,
+            interaction_context=interaction_context,
+            knowledge_available=knowledge_available,
+            router_reason=fallback_reason,
+        )
         return {
             "dialogue_mode": "QA_FACT",
             "intent_label": fallback_intent,
+            "target_owner_scope": False,
             "requires_evidence": True,
             "sub_queries": [last_human_msg],
+            "router_reason": fallback_reason,
+            "router_knowledge_available": knowledge_available,
         }
 
 @observe(name="evidence_gate_node")
@@ -1253,6 +1354,10 @@ async def realizer_node(state: TwinState):
         res.additional_kwargs["dialogue_mode"] = mode
         res.additional_kwargs["intent_label"] = state.get("intent_label")
         res.additional_kwargs["module_ids"] = state.get("persona_module_ids") or []
+        res.additional_kwargs["requires_evidence"] = bool(state.get("requires_evidence", False))
+        res.additional_kwargs["target_owner_scope"] = bool(state.get("target_owner_scope", False))
+        res.additional_kwargs["router_reason"] = state.get("router_reason")
+        res.additional_kwargs["router_knowledge_available"] = state.get("router_knowledge_available")
         if state.get("persona_spec_version"):
             res.additional_kwargs["persona_spec_version"] = state.get("persona_spec_version")
         if state.get("persona_prompt_variant"):
@@ -1299,6 +1404,10 @@ async def realizer_node(state: TwinState):
         fallback_msg.additional_kwargs["dialogue_mode"] = mode
         fallback_msg.additional_kwargs["intent_label"] = state.get("intent_label")
         fallback_msg.additional_kwargs["module_ids"] = state.get("persona_module_ids") or []
+        fallback_msg.additional_kwargs["requires_evidence"] = bool(state.get("requires_evidence", False))
+        fallback_msg.additional_kwargs["target_owner_scope"] = bool(state.get("target_owner_scope", False))
+        fallback_msg.additional_kwargs["router_reason"] = state.get("router_reason")
+        fallback_msg.additional_kwargs["router_knowledge_available"] = state.get("router_knowledge_available")
 
         return {
             "messages": [fallback_msg],
@@ -1504,6 +1613,8 @@ async def run_agent_stream(
         "persona_module_ids": [],
         "persona_spec_version": None,
         "persona_prompt_variant": None,
+        "router_reason": None,
+        "router_knowledge_available": None,
         # Path B / Phase 4 Context
         "full_settings": settings,
         "graph_context": graph_context,

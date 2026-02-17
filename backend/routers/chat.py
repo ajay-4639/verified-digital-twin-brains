@@ -582,6 +582,10 @@ async def chat(
             dialogue_mode = "ANSWER"
             intent_label = None
             module_ids = []
+            requires_evidence = None
+            target_owner_scope = None
+            router_reason = None
+            router_knowledge_available = None
             
             # Fetch graph stats for this twin
             from modules.graph_context import get_graph_stats
@@ -787,6 +791,22 @@ async def chat(
                                     intent_label = msg.additional_kwargs["intent_label"]
                                 if "module_ids" in msg.additional_kwargs:
                                     module_ids = msg.additional_kwargs["module_ids"] or []
+                                if "requires_evidence" in msg.additional_kwargs:
+                                    raw_requires = msg.additional_kwargs["requires_evidence"]
+                                    if isinstance(raw_requires, bool):
+                                        requires_evidence = raw_requires
+                                if "target_owner_scope" in msg.additional_kwargs:
+                                    raw_scope = msg.additional_kwargs["target_owner_scope"]
+                                    if isinstance(raw_scope, bool):
+                                        target_owner_scope = raw_scope
+                                if "router_reason" in msg.additional_kwargs:
+                                    raw_router_reason = msg.additional_kwargs["router_reason"]
+                                    if isinstance(raw_router_reason, str):
+                                        router_reason = raw_router_reason
+                                if "router_knowledge_available" in msg.additional_kwargs:
+                                    raw_knowledge = msg.additional_kwargs["router_knowledge_available"]
+                                    if isinstance(raw_knowledge, bool):
+                                        router_knowledge_available = raw_knowledge
                                 if "persona_spec_version" in msg.additional_kwargs:
                                     context_trace["persona_spec_version"] = msg.additional_kwargs["persona_spec_version"]
                                 if "persona_prompt_variant" in msg.additional_kwargs:
@@ -870,6 +890,16 @@ async def chat(
                 "planning_output": planning_output,
                 "dialogue_mode": dialogue_mode,
                 "intent_label": intent_label,
+                "requires_evidence": requires_evidence,
+                "target_owner_scope": target_owner_scope,
+                "router_reason": router_reason,
+                "router_knowledge_available": router_knowledge_available,
+                "router_policy": {
+                    "requires_evidence": requires_evidence,
+                    "target_owner_scope": target_owner_scope,
+                    "knowledge_available": router_knowledge_available,
+                    "reason": router_reason,
+                },
                 "module_ids": module_ids,
                 "graph_context": {
                     "has_graph": graph_stats["has_graph"],
